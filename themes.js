@@ -1,26 +1,43 @@
-/* Seasonal themes: one fixed palette per season (status colors included) plus
-   holiday accents. Edit the colors here to retune the look. */
+/* Themes. Colors normally come from the day's photo (see palette.js); the
+   season palettes below are only a fallback when a month has no photos.
+   MONTHS sets each month's default icon and drifting particles; icons can be
+   changed in the app's Settings. */
+const MONTHS = [
+  { key: 'january',   label: 'January',   icon: 'fa:snowflake',      particles: 'snow',   colors: ['#ffffff', '#eef4fa', '#dfeaf5'] },
+  { key: 'february',  label: 'February',  icon: 'fa:mountain-sun',   particles: 'snow',   colors: ['#ffffff', '#f3eefa', '#e6dff5'] },
+  { key: 'march',     label: 'March',     icon: 'fa:seedling',       particles: 'petals', colors: ['#f4f7f0', '#e3eedc', '#d6e8c8', '#ffffff'] },
+  { key: 'april',     label: 'April',     icon: 'ms:local_florist',  particles: 'petals', colors: ['#f7c6d5', '#f4b0c6', '#fde4ec', '#efa0bb'] },
+  { key: 'may',       label: 'May',       icon: 'ms:filter_vintage', particles: 'petals', colors: ['#d9b8f0', '#f2e6ff', '#ffffff', '#f7c6d5'] },
+  { key: 'june',      label: 'June',      icon: 'fa:sun',            particles: 'motes',  colors: ['#ffe58a', '#fff3b0', '#e8f59a'] },
+  { key: 'july',      label: 'July',      icon: 'fa:umbrella-beach', particles: 'motes',  colors: ['#fff3b0', '#ffffff', '#bff3ec'] },
+  { key: 'august',    label: 'August',    icon: 'ms:forest',         particles: 'motes',  colors: ['#ffe58a', '#fff3b0', '#e8f59a'] },
+  { key: 'september', label: 'September', icon: 'ms:park',           particles: 'leaves', colors: ['#e8b33a', '#d9a02a', '#c9862a', '#a8b83a', '#f0c850'] },
+  { key: 'october',   label: 'October',   icon: 'fa:leaf',           particles: 'leaves', colors: ['#e8892f', '#d9582b', '#f0b13c', '#c43d27', '#e9a03a'] },
+  { key: 'november',  label: 'November',  icon: 'fa:mug-hot',        particles: 'leaves', colors: ['#a0522d', '#8b4513', '#c46a2a', '#6b3a1f', '#d08a3a'] },
+  { key: 'december',  label: 'December',  icon: 'ms:fireplace',      particles: 'snow',   colors: ['#ffffff', '#eef4fa', '#dfeaf5'] }
+];
+
 const THEMES = {
   fall: {
-    label: 'Fall', icon: 'leaf',
+    label: 'Fall', icon: 'fa:leaf', cats: ['#e8892f', '#d9b23a', '#c95a3c', '#8fae4a', '#b8783a', '#d97a9a', '#6f9fc0', '#a98bd0'],
     vars: { bg: '#191715', surface: '#211e1b', surface2: '#2a2622', border: '#37322c', text: '#ede6dc', muted: '#a0968a',
             accent: '#d97b2f', h1: '#5b3a24', h2: '#5a4a20', h3: '#3f4a2b', h4: '#4d2c2a' },
     status: { not_started: '#837a71', p25: '#d9772b', p50: '#d9b23a', p75: '#a6b83f', done: '#5f9e4f', not_needed: '#5b8fb8' }
   },
   winter: {
-    label: 'Winter', icon: 'snowflake',
+    label: 'Winter', icon: 'fa:snowflake', cats: ['#8cc0e8', '#a79be0', '#6fc6b8', '#e8a0b8', '#e6c75a', '#e0904a', '#9ccf7a', '#c7d3e0'],
     vars: { bg: '#12161b', surface: '#1a2028', surface2: '#212934', border: '#2c3642', text: '#e6edf3', muted: '#8b98a8',
             accent: '#8cc0e8', h1: '#24405a', h2: '#3b3355', h3: '#23474a', h4: '#2e3f55' },
     status: { not_started: '#7b8592', p25: '#e0904a', p50: '#e6c75a', p75: '#b3c95d', done: '#6fb38a', not_needed: '#6f9fd8' }
   },
   spring: {
-    label: 'Spring', icon: 'flower-2',
+    label: 'Spring', icon: 'fa:seedling', cats: ['#e88fb0', '#8fca72', '#e8c45a', '#9ab0f0', '#c49be6', '#f0a070', '#6fc4c0', '#d8e07a'],
     vars: { bg: '#171916', surface: '#1f221e', surface2: '#272b26', border: '#343a32', text: '#eef1ea', muted: '#9ba395',
             accent: '#e88fb0', h1: '#5a3346', h2: '#3d5232', h3: '#574a2c', h4: '#36405a' },
     status: { not_started: '#858a80', p25: '#ec9a5c', p50: '#ebcf68', p75: '#b5d36a', done: '#6dbb6a', not_needed: '#79a7e0' }
   },
   summer: {
-    label: 'Summer', icon: 'sun',
+    label: 'Summer', icon: 'fa:sun', cats: ['#f2b94b', '#4fc1b8', '#f0805a', '#7fc45a', '#5aa0e8', '#e87aa0', '#c89be0', '#e8d85a'],
     vars: { bg: '#121817', surface: '#19211f', surface2: '#202a28', border: '#2b3735', text: '#e9f2ef', muted: '#8fa39e',
             accent: '#f2b94b', h1: '#1f4a48', h2: '#5a4a1c', h3: '#22475a', h4: '#5a3324' },
     status: { not_started: '#7f8c89', p25: '#f08c3c', p50: '#f2c94c', p75: '#b8d04f', done: '#4fb37e', not_needed: '#4f9ad8' }
@@ -37,41 +54,139 @@ const STATUSES = [
 ];
 
 const HOLIDAYS = {
-  halloween:    { label: 'Halloween', icon: 'pumpkin', accent: '#ef7f22' },
-  thanksgiving: { label: 'Thanksgiving', icon: 'wheat', accent: '#d9952f' },
-  winterfest:   { label: 'Winter holidays', icon: 'gift', accent: '#e05a5a' },
-  newyear:      { label: 'New Year', icon: 'party-popper', accent: '#e8c45a' },
-  valentine:    { label: "Valentine's Day", icon: 'heart', accent: '#ef6f93' },
-  stpatrick:    { label: "St. Patrick's Day", icon: 'clover', accent: '#5fbf6a' },
-  july4:        { label: 'Fourth of July', icon: 'sparkles', accent: '#e05656' }
+  halloween:    { label: 'Halloween', icon: 'fa:ghost', accent: '#ef7f22' },
+  thanksgiving: { label: 'Thanksgiving', icon: 'fa:wheat-awn', accent: '#d9952f' },
+  winterfest:   { label: 'Christmas', icon: 'fa:gift', accent: '#e05a5a' },
+  newyear:      { label: 'New Year', icon: 'fa:champagne-glasses', accent: '#e8c45a' },
+  valentine:    { label: "Valentine's Day", icon: 'fa:heart', accent: '#ef6f93' },
+  stpatrick:    { label: "St. Patrick's Day", icon: 'fa:clover', accent: '#5fbf6a' },
+  easter:       { label: 'Easter', icon: 'fa:egg', accent: '#e8a8c8' },
+  july4:        { label: 'Fourth of July', icon: 'fa:star', accent: '#e05656' }
 };
 
 function seasonFor(ds) {
-  const md = ds.slice(5);
-  if (md >= '12-21' || md < '03-20') return 'winter';
-  if (md < '06-21') return 'spring';
-  if (md < '09-22') return 'summer';
+  const m = +ds.slice(5, 7); // by calendar month, matching the photo folders
+  if (m === 12 || m <= 2) return 'winter';
+  if (m <= 5) return 'spring';
+  if (m <= 8) return 'summer';
   return 'fall';
 }
 
+// Easter Sunday (Gregorian), as 'YYYY-MM-DD'
+function easterDate(y) {
+  const a = y % 19, b = Math.floor(y / 100), c = y % 100, d = Math.floor(b / 4), e = b % 4, f = Math.floor((b + 8) / 25);
+  const g = Math.floor((b - f + 1) / 3), h = (19 * a + b - d - g + 15) % 30, i = Math.floor(c / 4), k = c % 4;
+  const l = (32 + 2 * e + 2 * i - h - k) % 7, m = Math.floor((a + 11 * h + 22 * l) / 451);
+  const month = Math.floor((h + l - 7 * m + 114) / 31), day = ((h + l - 7 * m + 114) % 31) + 1;
+  return y + '-' + Rec.pad(month) + '-' + Rec.pad(day);
+}
+
+// Holiday windows (inclusive): each holiday shows from N days before through the day itself.
 function holidayFor(ds) {
-  const md = ds.slice(5), y = +ds.slice(0, 4);
-  if (md >= '12-31' || md <= '01-02') return 'newyear';
-  if (md >= '02-07' && md <= '02-14') return 'valentine';
-  if (md >= '03-14' && md <= '03-17') return 'stpatrick';
-  if (md >= '07-01' && md <= '07-05') return 'july4';
-  if (md >= '10-15' && md <= '10-31') return 'halloween';
-  if (md >= '12-10' && md <= '12-30') return 'winterfest';
-  // Thanksgiving: Monday before the 4th Thursday of November through Sunday after
+  const y = +ds.slice(0, 4), n = Rec.dayNum(ds);
+  const within = (day, before) => { const d = Rec.dayNum(day); return n >= d - before && n <= d; };
   const nov1 = Rec.weekday(y + '-11-01');
-  const thu = 1 + ((4 - nov1 + 7) % 7) + 21;
-  const tg = y + '-11-' + Rec.pad(thu);
-  const n = Rec.dayNum(ds), t = Rec.dayNum(tg);
-  if (n >= t - 3 && n <= t + 3) return 'thanksgiving';
+  const thanksgiving = y + '-11-' + Rec.pad(1 + ((4 - nov1 + 7) % 7) + 21);
+  if (within((y + 1) + '-01-01', 2) || within(y + '-01-01', 0)) return 'newyear';   // Dec 30 – Jan 1
+  if (within(y + '-02-14', 2)) return 'valentine';                                   // Feb 12–14
+  if (within(y + '-03-17', 2)) return 'stpatrick';                                   // Mar 15–17
+  if (within(easterDate(y), 7)) return 'easter';                                     // week before + Easter
+  if (within(y + '-07-04', 2)) return 'july4';                                       // Jul 2–4
+  if (within(y + '-10-31', 7)) return 'halloween';                                   // Oct 24–31
+  if (within(thanksgiving, 7)) return 'thanksgiving';                                // week before + Thanksgiving
+  if (within(y + '-12-25', 14)) return 'winterfest';                                 // Dec 11–25
   return null;
 }
 
-/* ---------- banner illustrations (SVG, generated) ---------- */
+/* ---------- banner photos ----------
+   Photos live in banners/ and are listed in banners/banners.json by season
+   or holiday. One is picked per day; colors are pulled from it. */
+let BANNERS = null;
+async function loadBanners() {
+  try { const r = await fetch('banners/banners.json', { cache: 'no-cache' }); BANNERS = await r.json(); }
+  catch (e) { BANNERS = BANNERS || {}; }
+  try { localStorage.setItem('chores.banners', JSON.stringify(BANNERS)); } catch (e) {}
+}
+try { BANNERS = JSON.parse(localStorage.getItem('chores.banners')); } catch (e) {}
+
+const MONTH_KEYS = ['january', 'february', 'march', 'april', 'may', 'june', 'july', 'august', 'september', 'october', 'november', 'december'];
+const isPortraitScreen = () => typeof innerWidth !== 'undefined' && innerHeight > innerWidth * 1.1;
+// Holiday photos first, then that month's, then the season's.
+// Order: each list is shuffled; every photo shows once (one per day), then the
+// list is reshuffled. The shuffle is seeded by the date, so every device shows
+// the same photo without storing anything, and a photo never repeats two days
+// in a row (including across reshuffles and holiday/month switches).
+function seededShuffle(n, seed) {
+  let a = seed >>> 0;
+  const rnd = () => { a = a + 0x6D2B79F5 | 0; let t = Math.imul(a ^ a >>> 15, 1 | a); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; };
+  const p = [...Array(n).keys()];
+  for (let i = n - 1; i > 0; i--) { const j = Math.floor(rnd() * (i + 1)); [p[i], p[j]] = [p[j], p[i]]; }
+  return p;
+}
+function strSeed(s) { let h = 2166136261; for (const c of s) h = Math.imul(h ^ c.charCodeAt(0), 16777619); return h >>> 0; }
+function cycleOrder(key, n, cycle) {
+  const p = seededShuffle(n, strSeed(key + ':' + cycle));
+  if (n > 1 && cycle > 0) { // don't start a cycle with the photo that ended the previous one
+    const prev = seededShuffle(n, strSeed(key + ':' + (cycle - 1)));
+    if (p[0] === prev[n - 1]) [p[0], p[1]] = [p[1], p[0]];
+  }
+  return p;
+}
+function rawPick(ds, season, holiday, rotDs) {
+  const B = BANNERS || {}, month = MONTH_KEYS[+ds.slice(5, 7) - 1];
+  const key = [holiday, month, season].find(k => k && B[k] && B[k].length);
+  if (!key) return null;
+  const list = B[key].map(e => typeof e === 'string' ? { file: e } : e), n = list.length;
+  // Cycles start on the 1st of the month, or on the first day of a holiday window.
+  let anchor = rotDs.slice(0, 8) + '01', idx, seedKey;
+  if (key === holiday && typeof holidayFor === 'function') {
+    // holiday windows continue the same rotation year after year
+    anchor = rotDs;
+    for (let k = 0; k < 20 && holidayFor(Rec.addDays(anchor, -1)) === holiday; k++) anchor = Rec.addDays(anchor, -1);
+    let len = 1; while (len < 20 && holidayFor(Rec.addDays(anchor, len)) === holiday) len++;
+    idx = Math.max(0, +anchor.slice(0, 4) - 2026) * len + (Rec.dayNum(rotDs) - Rec.dayNum(anchor));
+    seedKey = key;
+  } else {
+    idx = Rec.dayNum(rotDs) - Rec.dayNum(anchor);
+    seedKey = key + '@' + anchor;
+  }
+  const cycle = Math.floor(idx / n), pos = idx % n;
+  const order = cycleOrder(seedKey, n, cycle);
+  return { list, order, pos, key, e: list[order[pos]] };
+}
+const samePhoto = (a, b) => !!(a && b && ((a.url || a.file) === (b.url || b.file) || (a.credit && a.credit === b.credit && a.w === b.w && a.h === b.h)));
+function bannerFor(ds, season, holiday, rotDs = ds) {
+  const r = rawPick(ds, season, holiday, rotDs);
+  if (!r) return null;
+  let e = r.e;
+  // also avoid repeating yesterday's photo when switching lists (e.g. Halloween -> November)
+  if (r.list.length > 1 && typeof holidayFor === 'function') {
+    const y = Rec.addDays(rotDs, -1), yds = ds === rotDs ? y : ds;
+    const prev = rawPick(yds, seasonFor(yds), ds === rotDs ? holidayFor(y) : holiday, y);
+    if (prev && prev.key !== r.key && samePhoto(prev.e, e)) e = r.list[r.order[(r.pos + 1) % r.list.length]];
+  }
+  const url = /^https?:/.test(e.file) ? e.file : 'banners/' + e.file;
+  return { url, focus: e.focus || 'center', phoneFocus: e.phoneFocus || e.focus || 'center', accent: e.accent || null,
+           layout: e.layout || null, w: e.w, h: e.h, cl: e.cl || null, credit: e.credit || '' };
+}
+
+// Drifting particles: holidays override the month's setting.
+const HOLIDAY_PARTICLES = {
+  valentine: ['hearts', ['#ef6f93', '#f7a8c0', '#e04a6f']],
+  winterfest: ['snow', ['#ffffff', '#eef4fa', '#dfeaf5']],
+  easter: ['petals', ['#f7c6d5', '#fde4ec', '#fff2b8', '#d8ecc8']],
+  newyear: ['motes', ['#ffd970', '#fff1c2', '#ffe9a0']],
+  july4: ['motes', ['#ff7a7a', '#ffffff', '#8fb4ff']],
+  halloween: ['leaves', ['#e8741f', '#c4521c', '#8a3a1c', '#f0a030', '#6a3a6a']],
+  thanksgiving: ['leaves', ['#c4632a', '#e09a35', '#8a3a20', '#d9b23a']],
+  stpatrick: ['petals', ['#5fbf6a', '#8fd88f', '#ffffff']]
+};
+function particlesFor(monthIdx, holiday) {
+  if (holiday && HOLIDAY_PARTICLES[holiday]) return HOLIDAY_PARTICLES[holiday];
+  const m = MONTHS[monthIdx]; return [m.particles, m.colors];
+}
+
+/* ---------- fallback banner illustrations (used until photos are added) ---------- */
 function rng(seed) {
   let a = seed >>> 0;
   return () => { a |= 0; a = a + 0x6D2B79F5 | 0; let t = Math.imul(a ^ a >>> 15, 1 | a);

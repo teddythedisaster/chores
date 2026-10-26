@@ -1,9 +1,9 @@
 /* Offline support. App files are fetched fresh from the network first (so
    updates you push to GitHub show up on the next open), falling back to the
    cached copy when offline or slow. */
-const CACHE = 'chores-v11';
+const CACHE = 'chores-v14';
 const PHOTOS = 'chores-photos-v1';
-const SHELL = ['./', 'index.html', 'styles.css', 'app.js', 'recurrence.js', 'themes.js', 'icons.js', 'icons-core.js', 'palette.js', 'particles.js', 'manifest.webmanifest', 'icon-192.png', 'icon-512.png'];
+const SHELL = ['./', 'index.html', 'styles.css', 'app.js', 'recurrence.js', 'themes.js', 'icons.js', 'icons-core.js', 'palette.js', 'particles.js', 'manifest.webmanifest', 'icon-192.png', 'icon-512.png', 'icon-maskable-v2-192.png', 'icon-maskable-v2-512.png'];
 
 self.addEventListener('install', e => {
   e.waitUntil(caches.open(CACHE).then(c => c.addAll(SHELL)).then(() => self.skipWaiting()));

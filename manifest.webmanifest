@@ -11,40 +11,28 @@
   "theme_color": "#111111",
   "icons": [
     {
-      "src": "appicon/halloween-73067bda-any-192.png",
+      "src": "appicon/halloween-26fcbf70-any-192.png",
       "sizes": "192x192",
       "type": "image/png",
       "purpose": "any"
     },
     {
-      "src": "appicon/halloween-73067bda-any-512.png",
+      "src": "appicon/halloween-26fcbf70-any-512.png",
       "sizes": "512x512",
       "type": "image/png",
       "purpose": "any"
     },
     {
-      "src": "appicon/halloween-73067bda-maskable-192.png",
+      "src": "appicon/halloween-26fcbf70-maskable-192.png",
       "sizes": "192x192",
       "type": "image/png",
       "purpose": "maskable"
     },
     {
-      "src": "appicon/halloween-73067bda-maskable-512.png",
+      "src": "appicon/halloween-26fcbf70-maskable-512.png",
       "sizes": "512x512",
       "type": "image/png",
       "purpose": "maskable"
-    },
-    {
-      "src": "appicon/halloween-73067bda-monochrome-192.png",
-      "sizes": "192x192",
-      "type": "image/png",
-      "purpose": "monochrome"
-    },
-    {
-      "src": "appicon/halloween-73067bda-monochrome-512.png",
-      "sizes": "512x512",
-      "type": "image/png",
-      "purpose": "monochrome"
     }
   ]
 }

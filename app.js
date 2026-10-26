@@ -56,7 +56,8 @@ function icon(name, cls = '') {
 }
 const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
 const metaVal = (k, d) => (S.meta[k] ? S.meta[k].value : d);
-const statusOf = (id, ds) => (S.statuses[id + '|' + ds] || {}).status || 'not_started';
+const statusOf = (id, key) => (S.statuses[id + '|' + key] || {}).status || 'not_started';
+const ANYTIME = 'anytime'; // status key for tasks with no date
 const statusLabel = id => (STATUSES.find(s => s.id === id) || STATUSES[0]).label;
 function svgPath(vb, p, cls = '') { return `<svg class="sic ${cls}" viewBox="${vb}" fill="currentColor" aria-hidden="true"><path d="${p}"/></svg>`; }
 function solid(id, cls = '') { const d = SOLID_CORE[id] || SOLID_CORE['fa:circle']; return svgPath(d[1], d[2], cls); }
@@ -76,15 +77,28 @@ function taskList() { return Object.values(S.tasks).filter(t => !t.deleted); }
 function passesFilter(t) { return ui.filter === 'All' || (t.category || '') === ui.filter; }
 
 /* ================= mutations (optimistic + queued) ================= */
+// Every change carries the list of fields it touches, so the server can merge field by
+// field: changing an icon on one device never undoes a streak switched on elsewhere.
 function applyOp(op) {
+  OV = null;
   if (op.t === 'task') {
-    const cur = S.tasks[op.rec.id];
-    if (cur && (cur.updatedAt || 0) > op.rec.updatedAt) return;
-    if (op.rec.deleted) delete S.tasks[op.rec.id]; else S.tasks[op.rec.id] = op.rec;
+    const id = op.rec.id, cur = S.tasks[id], fields = op.fields || Object.keys(op.rec);
+    if (!cur) { if (!op.rec.deleted && op.rec.name !== undefined) S.tasks[id] = Object.assign({}, op.rec); return; }
+    const next = Object.assign({}, cur);
+    fields.forEach(f => { if (op.rec[f] !== undefined) next[f] = op.rec[f]; });
+    next.updatedAt = Math.max(cur.updatedAt || 0, op.rec.updatedAt || 0);
+    if (next.deleted) delete S.tasks[id]; else S.tasks[id] = next;
   } else if (op.t === 'status') {
-    S.statuses[op.taskId + '|' + op.date] = { status: op.status, updatedAt: op.updatedAt };
+    const k = op.taskId + '|' + op.date, cur = Object.assign({ status: 'not_started', updatedAt: 0, ov: null }, S.statuses[k]);
+    if (op.status !== undefined) cur.status = op.status;
+    if (op.ov !== undefined) cur.ov = op.ov || null;
+    cur.updatedAt = Math.max(cur.updatedAt || 0, op.updatedAt || 0);
+    S.statuses[k] = cur;
   } else if (op.t === 'item') {
-    if (op.rec.deleted) delete S.items[op.rec.id]; else S.items[op.rec.id] = op.rec;
+    const id = op.rec.id, cur = S.items[id], fields = op.fields || Object.keys(op.rec);
+    const next = cur ? Object.assign({}, cur) : Object.assign({}, op.rec);
+    if (cur) fields.forEach(f => { if (op.rec[f] !== undefined) next[f] = op.rec[f]; });
+    if (next.deleted) delete S.items[id]; else S.items[id] = next;
   } else if (op.t === 'meta') {
     S.meta[op.key] = { value: op.value, updatedAt: op.updatedAt };
   }
@@ -96,10 +110,17 @@ function commit(op, rerender = true) {
   if (rerender) render();
   scheduleFlush();
 }
+// Change only the given fields of a task / list item / day status.
+const patchTask = (id, patch, rerender = true) => commit({ t: 'task', rec: Object.assign({ id }, patch, { updatedAt: Date.now() }), fields: Object.keys(patch) }, rerender);
+const patchItem = (id, patch, rerender = true) => commit({ t: 'item', rec: Object.assign({ id }, patch, { updatedAt: Date.now() }), fields: Object.keys(patch) }, rerender);
+const newItem = rec => commit({ t: 'item', rec: Object.assign({ checked: false, deleted: false }, rec, { updatedAt: Date.now() }) });
+const setStatus = (taskId, key, status, rerender = true) => commit({ t: 'status', taskId, date: key, status, updatedAt: Date.now(), fields: ['status'] }, rerender);
+const setOverride = (taskId, key, ov) => commit({ t: 'status', taskId, date: key, ov: ov || null, updatedAt: Date.now(), fields: ['ov'] });
 const setMeta = (key, value) => commit({ t: 'meta', key, value, updatedAt: Date.now() });
 
 /* ================= sync with Apps Script ================= */
 let flushTimer = null, inflight = false, retryMs = 4000;
+const BACKEND_VERSION = 5; // matches VERSION in Code.gs
 function scheduleFlush(ms = 350) { clearTimeout(flushTimer); flushTimer = setTimeout(flush, ms); }
 function setSync(s, msg = '') { ui.sync = s; ui.syncMsg = msg; const el = document.getElementById('sync'); if (el) el.outerHTML = syncBadge(); }
 
@@ -145,48 +166,117 @@ function loadServerState(st) {
     t.early = !!t.early; t.notify = !!t.notify;
     next.tasks[t.id] = t;
   });
-  (st.statuses || []).forEach(s => { next.statuses[s.taskId + '|' + s.date] = { status: s.status, updatedAt: s.updatedAt }; });
+  (st.statuses || []).forEach(s => { next.statuses[s.taskId + '|' + s.date] = { status: s.status || 'not_started', updatedAt: s.updatedAt, ov: s.ov || null }; });
   (st.items || []).forEach(i => { i.checked = !!i.checked; next.items[i.id] = i; });
   next.meta = st.meta || {};
   if (!next.meta.lists) next.meta.lists = { value: [{ id: 'shopping', name: 'Shopping' }], updatedAt: 0 };
-  const before = JSON.stringify(S);
-  S = next;
+  const wasOld = ui.backendOld;
+  ui.backendOld = (st.version || 0) < BACKEND_VERSION;
+  const before = fingerprint(S);
+  S = next; OV = null;
   outbox.forEach(applyOp); // keep anything not yet confirmed
   save();
-  if (JSON.stringify(S) !== before && !document.querySelector('.sheet input:focus, .sheet textarea:focus, .items input:focus')) render();
+  // Only redraw when something you can see actually changed (the server echoing back your
+  // own change is not a reason to redraw), and never in the middle of a tap.
+  if (fingerprint(S) !== before || wasOld !== ui.backendOld) renderWhenIdle();
+}
+// What's on screen, ignoring bookkeeping like timestamps.
+function fingerprint(st) {
+  const strip = o => { const c = Object.assign({}, o); delete c.updatedAt; delete c.ft; return c; };
+  const sortObj = o => Object.keys(o).sort().map(k => [k, o[k]]);
+  return JSON.stringify([
+    sortObj(st.tasks).map(([k, t]) => [k, sortObj(strip(t))]),
+    sortObj(st.statuses).map(([k, v]) => [k, v.status || 'not_started', v.ov || null]),
+    sortObj(st.items).map(([k, i]) => [k, sortObj(strip(i))]),
+    sortObj(st.meta).map(([k, m]) => [k, m.value])
+  ]);
+}
+// Redraw from a background sync, but wait until you're not touching the screen or typing.
+let lastTouch = 0, idleTimer = 0;
+['pointerdown', 'touchstart', 'keydown'].forEach(ev => document.addEventListener(ev, () => { lastTouch = Date.now(); }, { capture: true, passive: true }));
+function renderWhenIdle() {
+  clearTimeout(idleTimer);
+  const busy = Date.now() - lastTouch < 1500 || isw || drag ||
+    document.querySelector('#overlay.menu-mode, .sheet input:focus, .sheet textarea:focus, .items input:focus, .items textarea:focus');
+  if (busy) { idleTimer = setTimeout(renderWhenIdle, 700); return; }
+  render();
 }
 
 /* ================= derived lists ================= */
-function todayItems(pred = passesFilter) {
-  const today = ui.today, out = [];
-  taskList().forEach(t => {
-    if (!pred(t)) return;
-    if (Rec.occursOn(t, today)) out.push({ t, date: today, overdue: false });
-    else {
-      const p = Rec.prevOccurrence(t, today);
-      if (p && !FINISHED[statusOf(t.id, p)]) out.push({ t, date: p, overdue: true });
-    }
-  });
-  const rank = it => it.overdue ? 0 : FINISHED[statusOf(it.t.id, it.date)] ? 2 : 1;
-  return out.sort((a, b) => rank(a) - rank(b) || (a.overdue ? a.date.localeCompare(b.date) : 0) ||
-    (a.t.time || '99').localeCompare(b.t.time || '99') || a.t.name.localeCompare(b.t.name));
-}
-function weekItems(pred = passesFilter, days = 7, earlyOnly = true) {
-  const out = [];
-  for (let k = 1; k <= days; k++) {
-    const d = Rec.addDays(ui.today, k);
-    taskList().forEach(t => { if ((t.early || !earlyOnly) && pred(t) && Rec.occursOn(t, d)) out.push({ t, date: d, overdue: false }); });
+/* An "instance" is one occurrence of a task:
+   { t: the task with any one-off changes for that day applied,
+     date: the day it shows on ('' for undated tasks),
+     key: its original date, which its status and one-off changes are saved under,
+     overdue } */
+let OV = null; // index of one-off changes, rebuilt whenever data changes
+function ovIndex() {
+  if (OV) return OV;
+  OV = { by: {}, to: {} };
+  for (const k in S.statuses) {
+    const v = S.statuses[k]; if (!v || !v.ov) continue;
+    const i = k.lastIndexOf('|'), id = k.slice(0, i), d = k.slice(i + 1);
+    (OV.by[id] = OV.by[id] || {})[d] = v.ov;
+    if (v.ov.date && v.ov.date !== d) (OV.to[v.ov.date] = OV.to[v.ov.date] || []).push([id, d]);
   }
-  return out.sort((a, b) => a.date.localeCompare(b.date) || (a.t.time || '99').localeCompare(b.t.time || '99') || a.t.name.localeCompare(b.t.name));
+  return OV;
 }
-function dayItems(ds) {
-  return taskList().filter(t => passesFilter(t) && Rec.occursOn(t, ds)).map(t => ({ t, date: ds }))
-    .sort((a, b) => (a.t.time || '99').localeCompare(b.t.time || '99') || a.t.name.localeCompare(b.t.name));
+const ovOf = (id, key) => (ovIndex().by[id] || {})[key] || null;
+function effTask(t, key) {
+  const ov = ovOf(t.id, key); if (!ov) return t;
+  const e = Object.assign({}, t, ov, { id: t.id, _ov: ov }); delete e.date; return e;
+}
+const movedAway = (t, d) => { const ov = ovOf(t.id, d); return !!(ov && ov.date && ov.date !== d); };
+function inst(t, key, extra) { const ov = ovOf(t.id, key); return Object.assign({ t: effTask(t, key), date: (ov && ov.date) || key, key, overdue: false }, extra); }
+// every instance that lands on day ds (its regular one unless moved away, plus any moved here)
+function instancesOn(ds, pred = () => true) {
+  const out = [];
+  taskList().forEach(t => { if (pred(t) && Rec.occursOn(t, ds) && !movedAway(t, ds)) out.push(inst(t, ds)); });
+  (ovIndex().to[ds] || []).forEach(([id, key]) => { const t = S.tasks[id]; if (t && !t.deleted && pred(t) && Rec.occursOn(t, key)) out.push(inst(t, key)); });
+  return out;
+}
+const byTime = (a, b) => (a.t.time || '99').localeCompare(b.t.time || '99') || a.t.name.localeCompare(b.t.name);
+const stOf = it => statusOf(it.t.id, it.key);
+const isDailyTask = t => t.repeat === 'daily' && (+t.interval || 1) === 1;
+const isUndated = t => !t.start && (t.repeat || 'none') === 'none';
+// how many days before its due date a task can be started (older tasks: "early" = up to a week)
+const earlyDaysOf = t => t.earlyDays !== '' && t.earlyDays != null && !isNaN(+t.earlyDays) ? +t.earlyDays : (t.early ? 7 : 0);
+const opensOn = it => Rec.addDays(it.date, -earlyDaysOf(it.t));
+// can it be worked on today? (due today or earlier, or inside its "can start early" window)
+const availableNow = it => !it.date || opensOn(it) <= ui.today;
+
+function todayItems(pred = passesFilter) {
+  const today = ui.today, out = instancesOn(today, pred);
+  taskList().forEach(t => {
+    if (!pred(t) || out.some(it => it.t.id === t.id)) return;
+    const p = Rec.prevOccurrence(t, today); if (!p) return;
+    const it = inst(t, p, { overdue: true });
+    if (it.date < today && !FINISHED[stOf(it)]) out.push(it);
+  });
+  const rank = it => it.overdue ? 0 : FINISHED[stOf(it)] ? 2 : 1;
+  return out.sort((a, b) => rank(a) - rank(b) || (a.overdue ? a.date.localeCompare(b.date) : 0) || byTime(a, b));
+}
+// The week: every task that isn't an every-day one, due today through the next 6 days.
+function weekItems(pred = passesFilter) {
+  const out = [];
+  for (let k = 0; k < 7; k++) out.push(...instancesOn(Rec.addDays(ui.today, k), t => pred(t) && !isDailyTask(t)));
+  return out.sort((a, b) => a.date.localeCompare(b.date) || byTime(a, b));
+}
+// The week chart only counts what can be done now.
+const weekNowItems = (pred = passesFilter) => weekItems(pred).filter(availableNow);
+function upcomingItems(pred, days) {
+  const out = [];
+  for (let k = 1; k <= days; k++) out.push(...instancesOn(Rec.addDays(ui.today, k), pred));
+  return out.sort((a, b) => a.date.localeCompare(b.date) || byTime(a, b));
+}
+function dayItems(ds) { return instancesOn(ds, passesFilter).sort(byTime); }
+function undatedItems(pred = passesFilter) {
+  return taskList().filter(t => pred(t) && isUndated(t)).map(t => ({ t, date: '', key: ANYTIME, overdue: false }))
+    .sort((a, b) => !!FINISHED[stOf(a)] - !!FINISHED[stOf(b)] || a.t.name.localeCompare(b.t.name));
 }
 
 /* Streaks (opt-in per repeating task).
    Done +1 · 25/50/75% keeps it alive · Not needed pauses · today never breaks it.
-   Grace days: every 6 Done in a row earns one (bank up to 3); a missed
+   Shields: every N Done in a row earns one (save up to M; both adjustable); a missed
    occurrence spends one instead of resetting the streak. */
 let streakMemo = {};
 function streakInfo(t) {
@@ -195,13 +285,14 @@ function streakInfo(t) {
   if (streakMemo[key]) return streakMemo[key];
   const from = Rec.addDays(ui.today, -399);
   let cur = 0, best = 0, graces = 0, since = 0;
+  const max = shieldMaxOf(t), every = shieldEveryOf(t);
   const hist = [];
   for (let n = Rec.dayNum(t.start > from ? t.start : from), end = Rec.dayNum(ui.today); n <= end; n++) {
     const ds = Rec.fromNum(n);
     if (!Rec.occursOn(t, ds)) continue;
     const st = statusOf(t.id, ds);
     let kind;
-    if (st === 'done') { cur++; since++; kind = 'done'; if (since >= 6) { since = 0; if (graces < 3) { graces++; kind = 'earn'; } } }
+    if (st === 'done') { cur++; since++; kind = 'done'; if (since >= every) { since = 0; if (graces < max) { graces++; kind = 'earn'; } } }
     else if (st === 'not_needed') kind = 'pause';
     else if (ds === ui.today) kind = 'today';
     else if (st === 'p25' || st === 'p50' || st === 'p75') kind = 'partial';
@@ -210,12 +301,23 @@ function streakInfo(t) {
     if (cur > best) best = cur;
     hist.push({ date: ds, kind, status: st });
   }
-  return (streakMemo[key] = { cur, best, graces, since, hist, goal: parseInt(t.streakGoal, 10) || 0 });
+  return (streakMemo[key] = { cur, best, graces, since, hist, max, every, goal: parseInt(t.streakGoal, 10) || 0 });
 }
 function streakOf(t) { const i = streakInfo(t); return i ? i.cur : 0; }
-function graceDots(n) { return [0, 1, 2].map(i => `<span class="gd${i < n ? ' on' : ''}" title="Grace day">${solid('fa:shield-halved')}</span>`).join(''); }
+// Shields: a saved-up shield covers a missed day. How many you can save, and how many
+// done-in-a-row earn one, can be set per task (blank = the defaults in Settings).
+const intOr = (v, d, lo, hi) => { const n = parseInt(v, 10); return isNaN(n) ? d : Math.max(lo, Math.min(hi, n)); };
+const shieldMaxDefault = () => intOr(metaVal('shieldMax', 3), 3, 0, 10);
+const shieldEveryDefault = () => intOr(metaVal('shieldEvery', 6), 6, 1, 99);
+const shieldMaxOf = t => intOr(t.shieldMax, shieldMaxDefault(), 0, 10);
+const shieldEveryOf = t => intOr(t.shieldEvery, shieldEveryDefault(), 1, 99);
+function graceDots(n, max = 3) {
+  if (!max) return '';
+  if (max > 5) return `<span class="gd on gd-count" title="Shields">${solid('fa:shield-halved')}${n}/${max}</span>`;
+  return Array.from({ length: max }, (_, i) => `<span class="gd${i < n ? ' on' : ''}" title="Shield">${solid('fa:shield-halved')}</span>`).join('');
+}
 function histDots(h) {
-  return h.slice(-14).map(x => `<span class="hd hd-${x.kind}" title="${fmtShort(x.date)}: ${{ done: 'Done', earn: 'Done · earned a grace day', partial: 'Partly done', pause: 'Not needed (paused)', grace: 'Missed · grace day used', miss: 'Missed', today: 'Today' }[x.kind]}"></span>`).join('');
+  return h.slice(-14).map(x => `<span class="hd hd-${x.kind}" title="${fmtShort(x.date)}: ${{ done: 'Done', earn: 'Done · earned a shield', partial: 'Partly done', pause: 'Not needed (paused)', grace: 'Missed · shield used', miss: 'Missed', today: 'Today' }[x.kind]}"></span>`).join('');
 }
 const pinned = () => (metaVal('pinnedStreaks', []) || []).filter(id => S.tasks[id] && S.tasks[id].streak);
 function streaksHTML(pred = () => true, onlyIds = null) {
@@ -232,9 +334,9 @@ function streaksHTML(pred = () => true, onlyIds = null) {
         <span class="sc-count${i.cur ? '' : ' zero'}">${solid('fa:fire-flame-curved')}${i.cur}</span></span>
       ${!i.goal && !onlyIds ? `<span class="sc-nogoal">No goal yet · tap to set one</span>` : ''}
       ${i.goal ? `<span class="sc-goal"><span class="bar"><span style="width:${pct}%"></span></span><span class="gl">${i.cur >= i.goal ? solid('fa:trophy') + ' Goal reached' : i.cur + ' / ' + i.goal}</span></span>` : ''}
-      <span class="sc-bottom"><span class="hds">${histDots(i.hist)}</span><span class="gds">${graceDots(i.graces)}</span></span>
+      <span class="sc-bottom"><span class="hds">${histDots(i.hist)}</span><span class="gds">${graceDots(i.graces, i.max)}</span></span>
     </button>`; }).join('')}</div>
-    ${onlyIds ? '' : `<div class="hint streak-key">${solid('fa:shield-halved', 'inline')} grace days: earn one for every 6 done in a row (up to 3); a missed day uses one instead of breaking the streak.</div>`}`;
+    ${onlyIds ? '' : `<div class="hint streak-key">${solid('fa:shield-halved', 'inline')} shields: earn one for every ${shieldEveryDefault()} done in a row (save up to ${shieldMaxDefault()}); a missed day uses one instead of breaking the streak. Change this per task under More options, or for all tasks in Settings.</div>`}`;
 }
 function historyOf(t, count = 14) {
   const out = [];
@@ -331,17 +433,20 @@ function pill(st, attrs = '') {
 }
 
 function rowHTML(it, mode) {
-  const { t, date } = it, st = statusOf(t.id, date), fin = FINISHED[st];
+  const { t, date, key } = it, st = stOf(it), fin = FINISHED[st];
+  const later = mode === 'week' && !fin && !availableNow(it);
   let due = '';
-  if (it.overdue) due = `<span class="od">${fmtShort(date)}</span>`;
-  else if (mode === 'week') due = `<span>${fmtDow(date)}</span>${t.time ? `<span class="sub">${fmt12(t.time)}</span>` : ''}`;
+  if (!date) due = '<span class="sub">Anytime</span>';
+  else if (it.overdue) due = `<span class="od">${fmtShort(date)}</span>`;
+  else if (mode === 'week') due = `<span>${date === ui.today ? 'Today' : fmtDow(date)}</span>${later ? `<span class="sub">from ${opensOn(it) === Rec.addDays(ui.today, 1) ? 'tmrw' : DOW[Rec.weekday(opensOn(it))]}</span>` : t.time ? `<span class="sub">${fmt12(t.time)}</span>` : ''}`;
   else due = t.time ? `<span>${fmt12(t.time)}</span>` : '<span class="sub">Today</span>';
-  const streak = streakOf(t);
+  const streak = streakOf(S.tasks[t.id] || t);
   const meta = [t.repeat && t.repeat !== 'none' ? `<span class="rep" title="Repeats">${icon('repeat')}</span>` : '',
+    t._ov ? `<span class="rep" title="Changed for this day only">${icon('pencil')}</span>` : '',
     t.streak && streak >= 1 ? `<span class="streak">${icon('flame')}${streak}</span>` : ''].join('');
-  return `<div class="row${fin ? ' fin' : ''}${it.overdue ? ' overdue' : ''}">
-    ${pill(st, `data-act="status" data-task="${t.id}" data-date="${date}"`)}
-    <button class="name" data-act="edit-task" data-task="${t.id}">
+  return `<div class="row${fin ? ' fin' : ''}${it.overdue ? ' overdue' : ''}${later ? ' later' : ''}">
+    ${pill(st, `data-act="status" data-task="${t.id}" data-date="${key}"`)}
+    <button class="name" data-act="edit-task" data-task="${t.id}" data-key="${key}">
       <span class="ticon" style="--ic:${iconColor(t)}">${taskIcon(t)}</span>
       <span class="ntext"><span class="nm">${esc(t.name)}</span>${meta ? `<span class="meta">${meta}</span>` : ''}</span>
     </button>
@@ -353,19 +458,19 @@ function tableHTML(items, mode, emptyMsg, view, tid) {
   const catAttr = view && view.cats && view.cats[0] ? ` data-cat="${esc(view.cats[0])}"` : '';
   tid = tid || ui.tab + '-' + mode;
   const showDone = !!(ui.showDone || {})[tid];
-  const open = items.filter(it => !FINISHED[statusOf(it.t.id, it.date)]), fin = items.length - open.length;
+  const open = items.filter(it => !FINISHED[stOf(it)]), fin = items.length - open.length;
   const shown = showDone ? items : open;
   return `<div class="table">
     <div class="thead"><span>${icon('loader-circle')}Status</span><span>${icon('list-todo')}Task name</span><span>${icon('calendar')}Due</span></div>
     ${shown.length ? shown.map(it => rowHTML(it, mode)).join('') : `<div class="empty">${fin ? 'All done here' : emptyMsg}</div>`}
     ${fin ? `<button class="showdone" data-act="toggle-done" data-tid="${tid}">${icon('check')}${fin} finished · ${showDone ? 'Hide' : 'Show'}</button>` : ''}
-    <button class="newrow" data-act="new-task"${catAttr}${mode === 'week' ? ` data-date="${Rec.addDays(ui.today, 1)}"${view ? '' : ' data-early="1"'}` : ''}>${icon('plus')}New task</button>
+    <button class="newrow" data-act="new-task"${catAttr}${mode === 'week' ? ` data-date="${Rec.addDays(ui.today, 1)}"` : mode === 'anytime' ? ' data-undated="1"' : ''}>${icon('plus')}New task</button>
   </div>`;
 }
 
 function pieHTML(items, label, single = false) {
   const counts = {}; STATUSES.forEach(s => counts[s.id] = 0);
-  items.forEach(it => counts[statusOf(it.t.id, it.date)]++);
+  items.forEach(it => counts[stOf(it)]++);
   const total = items.length, R = 52, C = 2 * Math.PI * R;
   let off = 0, arcs = '';
   if (total) STATUSES.forEach(s => {
@@ -413,7 +518,7 @@ function calendarHTML() {
     let shown = items, dailyHidden = 0;
     if (items.length > MAX) { shown = items.filter(it => !isDaily(it.t)); dailyHidden = items.length - shown.length; }
     shown = shown.slice().sort((a, b) => isDaily(a.t) - isDaily(b.t));
-    const icons = shown.map(it => `<span class="mini${FINISHED[statusOf(it.t.id, ds)] ? ' fin' : ''}" style="color:${iconColor(it.t)}" title="${esc(it.t.name)}">${taskIcon(it.t)}</span>`).join('');
+    const icons = shown.map(it => `<span class="mini${FINISHED[stOf(it)] ? ' fin' : ''}" style="color:${iconColor(it.t)}" title="${esc(it.t.name)}">${taskIcon(it.t)}</span>`).join('');
     const more = dailyHidden ? `<span class="more">+${dailyHidden} daily</span>` : '';
     cells += `<button class="wk-cell${ds === ui.today ? ' today' : ''}${ds === ui.calDay ? ' sel' : ''}${ds < ui.today ? ' past' : ''}" data-act="cal-day" data-date="${ds}">
       <span class="dow">${DOW[i]}</span><span class="num">${+ds.slice(8)}</span><span class="wk-icons">${icons}${more}</span></button>`;
@@ -431,6 +536,16 @@ function calendarHTML() {
     </div></div>`;
 }
 
+// One checklist row. Swipe it left to reveal the delete button (on a computer, hover shows it).
+function itemRowHTML(i, extra = '') {
+  return `<div class="item swipe${i.checked ? ' checked' : ''}" data-row="${i.id}">
+    <div class="item-inner">
+      <button class="cb" data-act="item-toggle" data-item="${i.id}" aria-label="Toggle">${icon(i.checked ? 'square-check-big' : 'square')}</button>
+      <textarea rows="1" data-item-edit="${i.id}" aria-label="Item" enterkeyhint="done" autocapitalize="sentences">${esc(i.text)}</textarea>
+      ${extra}
+    </div>
+    <button class="item-x" data-act="item-del" data-item="${i.id}" aria-label="Delete" tabindex="-1">${icon('x')}</button></div>`;
+}
 // Lists: chips at the top show/hide each list (this device only); every visible list
 // gets its own titled section on the page.
 function listsHTML(inBlock = false, intro = '') {
@@ -447,15 +562,12 @@ function listsHTML(inBlock = false, intro = '') {
     // long lists tuck checked items away (tap to show them)
     const nChecked = items.filter(i => i.checked).length, long = items.length > 8;
     const showChecked = !long || !!(ui.showChecked || {})[l.id];
-    const rows = items.filter(i => showChecked || !i.checked).map(i => `<div class="item${i.checked ? ' checked' : ''}">
-        <button class="cb" data-act="item-toggle" data-item="${i.id}" aria-label="Toggle">${icon(i.checked ? 'square-check-big' : 'square')}</button>
-        <input value="${esc(i.text)}" data-item-edit="${i.id}" aria-label="Item">
-        <button class="iconbtn faint" data-act="item-del" data-item="${i.id}" aria-label="Delete">${icon('x')}</button></div>`).join('');
+    const rows = items.filter(i => showChecked || !i.checked).map(i => itemRowHTML(i)).join('');
     const left = items.filter(i => !i.checked).length;
     return `<div class="${inBlock ? 'list-sec' : 'block'}"><h2 class="hblock ${heads[k % 4]} list-head">${esc(l.name)}<span class="lh-count">${left}</span>
         <button class="iconbtn" data-act="list-menu" data-list="${l.id}" aria-label="Rename or delete ${esc(l.name)}">${icon('ellipsis')}</button></h2>
       <div class="items">${rows}
-        <div class="item new"><span class="cb">${icon('plus')}</span><input class="new-item" data-list="${l.id}" placeholder="Add item" enterkeyhint="done"></div></div>
+        <div class="item new"><span class="cb">${icon('plus')}</span><textarea rows="1" class="new-item" data-list="${l.id}" placeholder="Add item" enterkeyhint="done" autocapitalize="sentences"></textarea></div></div>
       ${long && nChecked ? `<button class="showdone" data-act="toggle-checked" data-list="${l.id}">${icon('check')}${nChecked} checked · ${showChecked ? 'Hide' : 'Show'}</button>` : ''}
       ${items.some(i => i.checked) ? `<button class="chip small" data-act="items-clear" data-list="${l.id}">${icon('eraser')}Clear checked</button>` : ''}</div>`;
   }).join('');
@@ -506,13 +618,9 @@ function navHTML(where) {
 
 function notesHTML() {
   const notes = Object.values(S.items).filter(i => i.listId === '__notes').sort((a, b) => (a.checked - b.checked) || (a.sort - b.sort));
-  const rows = notes.map(i => `<div class="item${i.checked ? ' checked' : ''}">
-      <button class="cb" data-act="item-toggle" data-item="${i.id}" aria-label="Toggle">${icon(i.checked ? 'square-check-big' : 'square')}</button>
-      <input value="${esc(i.text)}" data-item-edit="${i.id}" aria-label="Note">
-      <button class="iconbtn faint" data-act="note-to-task" data-item="${i.id}" title="Make it a task" aria-label="Make it a task">${icon('calendar-plus')}</button>
-      <button class="iconbtn faint" data-act="item-del" data-item="${i.id}" aria-label="Delete">${icon('x')}</button></div>`).join('');
+  const rows = notes.map(i => itemRowHTML(i, `<button class="iconbtn faint" data-act="note-to-task" data-item="${i.id}" title="Make it a task" aria-label="Make it a task">${icon('calendar-plus')}</button>`)).join('');
   return `<div class="items notes">${rows}
-      <div class="item new"><span class="cb">${icon('plus')}</span><input id="new-note" placeholder="Jot down a quick task…" enterkeyhint="done"></div></div>
+      <div class="item new"><span class="cb">${icon('plus')}</span><textarea rows="1" id="new-note" class="new-item" data-list="__notes" placeholder="Jot down a quick task…" enterkeyhint="done" autocapitalize="sentences"></textarea></div></div>
     ${notes.some(i => i.checked) ? `<button class="chip small" data-act="notes-clear">${icon('eraser')}Clear checked</button>` : ''}`;
 }
 
@@ -539,7 +647,7 @@ function tagsHTML() {
     <button class="chip" data-act="settings" data-sec="views" aria-label="Edit tags">${icon('pencil')}</button></div>`;
   if (!v) return chips + '<div class="empty">No tag views yet. Add some in Settings.</div>';
   const pred = viewPred(v);
-  const tI = todayItems(pred), upcomingAll = weekItems(pred, 14, false);
+  const tI = todayItems(pred), upcomingAll = upcomingItems(pred, 14), und = undatedItems(pred);
   const seen = new Set(tI.map(it => it.t.id)), upcoming = upcomingAll.filter(it => !seen.has(it.t.id) && seen.add(it.t.id));
   const all = taskList().filter(pred).sort((a, b) => a.name.localeCompare(b.name));
   const allRows = all.map(t => { const nd = nextDue(t); return `<button class="lrow" data-act="edit-task" data-task="${t.id}">
@@ -548,11 +656,12 @@ function tagsHTML() {
       <span class="due"><span class="sub">${nd ? (nd === ui.today ? 'Today' : fmtDow(nd)) : '—'}</span></span></button>`; }).join('');
   const catHint = (v.cats || []).join(', ');
   return `${chips}
-    ${stickyPie([...tI, ...upcomingAll.filter(it => it.date <= Rec.addDays(ui.today, 7))], 'Next 7 days')}
+    ${stickyPie([...tI, ...upcomingAll.filter(it => it.date <= Rec.addDays(ui.today, 6) && !isDailyTask(it.t) && availableNow(it))], 'Doable now')}
     <section class="grid2">
       <div class="block"><h2 class="hblock h1">Today</h2>${tableHTML(tI, 'today', 'Nothing due today', v, 'tag-' + v.id + '-today')}</div>
       <div class="block"><h2 class="hblock h2">Coming up</h2><div class="hint">Next date for each task, up to 2 weeks out</div>${tableHTML(upcoming, 'week', 'Nothing in the next 2 weeks', v, 'tag-' + v.id + '-up')}</div>
     </section>
+    ${und.length ? `<div class="block"><h2 class="hblock h1">Anytime</h2>${tableHTML(und, 'anytime', '', v, 'tag-' + v.id + '-any')}</div>` : ''}
     <div class="block"><h2 class="hblock h3">All ${esc(v.name)} tasks</h2>
       <div class="hint">Tasks with the ${(v.cats || []).length > 1 ? 'categories' : 'category'} <b>${esc(catHint)}</b></div>
       <div class="table">${allRows || '<div class="empty">None yet. Give a task one of these categories to see it here.</div>'}</div></div>
@@ -560,6 +669,7 @@ function tagsHTML() {
     <div class="cp-spacer"></div>`;
 }
 
+const WEEK_HINT = 'Today and the next 6 days, except everyday tasks. Faded ones can’t be started yet; the chart counts only what you can do now.';
 function stickyPie(items, label) {
   return `<section class="chart-sticky">${pieHTML(items, label, true)}</section>`;
 }
@@ -568,8 +678,8 @@ function threeDayHTML() {
   return `<div class="three">${days.map(([k, name]) => {
     const ds = Rec.addDays(ui.today, k), items = dayItems(ds);
     return `<div class="td-col${k === 0 ? ' now' : ''}"><div class="td-head"><b>${name}</b><span>${fmtDow(ds)}</span></div>
-      ${items.length ? items.map(it => { const st = statusOf(it.t.id, ds);
-        return `<button class="td-item${FINISHED[st] ? ' fin' : ''}" data-act="status" data-task="${it.t.id}" data-date="${ds}">
+      ${items.length ? items.map(it => { const st = stOf(it);
+        return `<button class="td-item${FINISHED[st] ? ' fin' : ''}" data-act="status" data-task="${it.t.id}" data-date="${it.key}">
           <span class="dot" style="background:var(--st-${st})"></span><span class="td-name">${esc(it.t.name)}</span>${it.t.time ? `<span class="td-time">${fmt12(it.t.time).replace(':00', '').replace(' ', '')}</span>` : ''}</button>`; }).join('')
         : '<div class="td-empty">Nothing</div>'}
       <button class="td-add" data-act="new-task" data-date="${ds}" aria-label="Add a task on ${name}">${icon('plus')}</button></div>`; }).join('')}</div>`;
@@ -592,9 +702,9 @@ function pageBody() {
     }
     case 'week': {
       const wI = weekItems();
-      return `${stickyPie(wI, "Week's Progress")}
+      return `${stickyPie(wI.filter(availableNow), "Doable now")}
         <section class="grid2">
-          <div class="block"><h2 class="hblock h2">This Week’s To-do</h2><div class="hint">Next 7 days · only tasks that can be done early</div>${tableHTML(wI, 'week', 'Nothing to get ahead on')}</div>
+          <div class="block"><h2 class="hblock h2">This Week’s To-do</h2><div class="hint">${WEEK_HINT}</div>${tableHTML(wI, 'week', 'Nothing this week')}</div>
           <div class="block"><h2 class="hblock h3">Calendar</h2>${calendarHTML()}</div>
         </section>
         <div class="cp-spacer"></div>`;
@@ -602,16 +712,17 @@ function pageBody() {
     case 'tags': return tagsHTML();
     case 'lists': return listsHTML();
     default: {
-      const tI = todayItems(), wI = weekItems();
-      return `<section class="charts">${pieHTML(tI, "Today's Progress")}${pieHTML(wI, "Week's Progress")}</section>
+      const tI = todayItems(), wI = weekItems(), und = undatedItems();
+      return `<section class="charts">${pieHTML(tI, "Today's Progress")}${pieHTML(wI.filter(availableNow), "Week · doable now")}</section>
         <section class="grid2">
           <div class="block"><h2 class="hblock h1">Today’s To-do</h2>${tableHTML(tI, 'today', 'All clear for today')}</div>
-          <div class="block"><h2 class="hblock h2">This Week’s To-do</h2><div class="hint">Next 7 days · only tasks that can be done early</div>${tableHTML(wI, 'week', 'Nothing to get ahead on')}</div>
+          <div class="block"><h2 class="hblock h2">This Week’s To-do</h2><div class="hint">${WEEK_HINT}</div>${tableHTML(wI, 'week', 'Nothing this week')}</div>
         </section>
         <section class="grid2">
+          <div class="block"><h2 class="hblock h4">Anytime</h2><div class="hint">Tasks with no date</div>${tableHTML(und, 'anytime', 'No undated tasks. Make one with <b>No date</b> in a new task.', null, 'ov-any')}</div>
           <div class="block"><h2 class="hblock h3">Pinned streaks</h2>${streaksHTML(() => true, pinned())}</div>
-          ${wide ? `<div class="block">${listsHTML(true)}</div>` : ''}
-        </section>`;
+        </section>
+        ${wide ? `<section><div class="block">${listsHTML(true)}</div></section>` : ''}`;
     }
   }
 }
@@ -645,6 +756,7 @@ function render() {
     <button class="iconbtn" data-act="settings" aria-label="Settings">${icon('settings')}</button>
   </header>
   ${top}
+  ${config.url && ui.backendOld ? `<div class="warnbar">${icon('cloud-off')}<span><b>Your Google Sheet script is out of date</b>, so some changes won’t save. In Apps Script, paste in the new Code.gs, then Deploy → Manage deployments → pencil → Version: New version → Deploy.</span></div>` : ''}
   <main class="page tab-${ui.tab}">
     <div class="hero">
       <div class="page-icon">${pageIconHTML()}</div>
@@ -657,6 +769,8 @@ function render() {
   </main>
   <button class="fab" data-act="new-task" aria-label="New task">${icon('plus')}</button>
   ${navHTML('bottom')}`;
+  fitTextareas();
+  if (ui.openRow) { const r = document.querySelector(`.item.swipe[data-row="${ui.openRow}"]`); if (r) r.classList.add('open'); }
   if (ui.lastTab !== ui.tab) { ui.lastTab = ui.tab; window.scrollTo(0, 0); } else window.scrollTo(0, y);
   updateChartShrink();
 }
@@ -677,22 +791,38 @@ function openStatusMenu(btn) {
   const r = btn.getBoundingClientRect();
   overlay().className = 'on menu-mode';
   overlay().innerHTML = `<div class="scrim" data-act="close"></div>
-    <div class="menu" style="left:${Math.min(r.left, innerWidth - 200)}px;top:${Math.min(r.bottom + 4, innerHeight - 280)}px">
+    <div class="menu" style="left:${Math.min(r.left, innerWidth - 200)}px;top:${Math.max(8, Math.min(r.bottom + 4, innerHeight - 300))}px">
       ${STATUSES.map(s => `<button class="menu-item${s.id === cur ? ' cur' : ''}" data-act="set-status" data-task="${task}" data-date="${date}" data-status="${s.id}">
         ${pill(s.id, 'tabindex="-1"')}${s.id === cur ? icon('check') : ''}</button>`).join('')}
     </div>`;
 }
 
 let ed = null; // task being edited
+const clone = o => JSON.parse(JSON.stringify(o));
 function openEditor(id, opts = {}) {
   const t = id ? S.tasks[id] : null;
-  ed = t ? JSON.parse(JSON.stringify(t)) : {
-    id: uid(), name: opts.name || '', icon: '', iconData: '', color: '', category: opts.cat || '', start: opts.date || ui.today, time: '',
-    repeat: 'none', interval: 1, weekdays: '', dayOfMonth: '', end: '', early: !!opts.early, notify: false, notes: ''
+  if (id && !t) return;
+  ed = t ? clone(t) : {
+    id: uid(), name: opts.name || '', icon: '', iconData: '', color: '', category: opts.cat || '', start: opts.undated ? '' : (opts.date || ui.today), time: '',
+    repeat: 'none', interval: 1, weekdays: '', dayOfMonth: '', end: '', early: false, earlyDays: '', notify: false, notes: ''
   };
+  ed._orig = t ? clone(t) : null;
+  if (t) ed.earlyDays = earlyDaysOf(t); // older tasks only had an on/off "early" switch
+  ed._adv = !!ui.edAdv; // remembers whether you last had "More options" open
   ed._new = !t; ed._picker = false; ed._fromNote = opts.fromNote || null; ed._pin = !!t && pinned().includes(t.id);
+  // opened from one day of a repeating task: offer "just this day" vs "every repeat"
+  ed._key = t && t.repeat && t.repeat !== 'none' && opts.key ? opts.key : null;
+  ed._mode = 'series';
+  if (ed._key && ovOf(t.id, ed._key)) return setEdMode('one');
   renderEditor();
   if (!t) setTimeout(() => { const n = document.querySelector('[data-field=name]'); n && n.focus(); }, 60);
+}
+function setEdMode(mode) {
+  const t = S.tasks[ed.id], key = ed._key; if (!t) return;
+  const keep = { _key: key, _mode: mode, _new: false, _picker: false, _pin: ed._pin, _adv: ed._adv, _orig: clone(t) };
+  if (mode === 'one') { const e = clone(effTask(t, key)); delete e._ov; ed = Object.assign(e, keep, { start: (ovOf(t.id, key) || {}).date || key }); }
+  else ed = Object.assign(clone(t), keep);
+  renderEditor();
 }
 
 function renderEditor() {
@@ -700,66 +830,99 @@ function renderEditor() {
   const wds = Rec.weekdaysOf(Object.assign({}, t, { start: t.start || ui.today }));
   const unit = { daily: 'day', weekly: 'week', monthly: 'month', yearly: 'year' }[t.repeat];
   const repeating = t.repeat && t.repeat !== 'none';
+  const one = t._mode === 'one', undated = !repeating && !t.start, adv = !!t._adv;
+  const scope = t._key ? `<div class="seg scope">
+      <button class="${one ? 'on' : ''}" data-act="ed-scope" data-v="one">Just ${esc(fmtDow(t._key))}</button>
+      <button class="${one ? '' : 'on'}" data-act="ed-scope" data-v="series">Every repeat</button></div>
+      ${one ? `<div class="muted small scope-note">Changes here apply only to the ${esc(fmtShort(t._key))} one. The other repeats stay as they are.${ovOf(t.id, t._key) ? ` <button class="linkbtn" data-act="ed-reset-one">Undo changes for this day</button>` : ''}</div>` : ''}` : '';
   let stats = '';
-  if (!t._new && repeating) {
+  if (!t._new && repeating && !one) {
     const si = t.streak ? streakInfo(Object.assign({}, S.tasks[t.id] || t, { streak: true })) : null;
     const h = historyOf(t), done = h.filter(x => x.status === 'done').length;
     stats = si ? `<div class="field"><label>Streak</label>
-        <div class="sc-line">${solid('fa:fire-flame-curved')}<b>${si.cur}</b> in a row <span class="gds">${graceDots(si.graces)}</span></div>
+        <div class="sc-line">${solid('fa:fire-flame-curved')}<b>${si.cur}</b> in a row <span class="gds">${graceDots(si.graces, si.max)}</span></div>
         <div class="hds big">${histDots(si.hist)}</div></div>`
       : `<div class="field"><label>History</label><div class="hist">
       ${h.map(x => `<span class="hdot" title="${fmtShort(x.date)}: ${statusLabel(x.status)}" style="background:var(--st-${x.status})"></span>`).join('')}</div>
       <div class="muted small">${done}/${h.length} of the last ${h.length} done</div></div>`;
   }
   const hueOrder = (ui.cats || []).map((c, i) => [Palette.rgb2hsl(...c.match(/\w\w/g).map(x => parseInt(x, 16)))[0], i]).sort((a, b) => a[0] - b[0]).map(x => x[1]);
-  overlay().className = 'on sheet-mode';
-  overlay().innerHTML = `<div class="scrim" data-act="close"></div>
-  <div class="sheet" role="dialog" aria-label="Task">
-    <div class="sheet-head"><b>${t._new ? 'New task' : 'Edit task'}</b><span class="spacer"></span>
-      <button class="iconbtn" data-act="close" aria-label="Close">${icon('x')}</button></div>
-    <div class="sheet-body">
-      <div class="namerow">
-        <button class="iconpick" data-act="ed-picker" aria-label="Choose icon" style="--ic:${iconColor(t)}">${taskIcon(t)}</button>
-        <input data-field="name" value="${esc(t.name)}" placeholder="Task name" enterkeyhint="done">
-      </div>
-      ${t._picker ? `<div class="picker"><input data-field="_q" value="${esc(t._q || '')}" placeholder="Search icons: laundry, meds, trash, cat…" autocomplete="off">
-        <div class="picker-grid" style="--ic:${iconColor(t)}">${pickerGridHTML()}</div>
-        <div class="muted small picker-note">${CATALOG ? CATALOG.length.toLocaleString() + ' icons · Font Awesome first, then Material' : 'Loading full icon set…'}</div></div>` : ''}
-      <div class="field two">
-        <div><label>${repeating ? 'Starts' : 'Due date'}</label><input type="date" data-field="start" value="${t.start}"></div>
-        <div><label>Time (optional)</label><input type="time" data-field="time" value="${t.time || ''}"></div>
-      </div>
-      <div class="field"><label>Repeat</label>
-        <div class="seg">${['none', 'daily', 'weekly', 'monthly', 'yearly'].map(r =>
+  const pinFull = !t._pin && pinned().filter(id => id !== t.id).length >= 5;
+  const defMax = shieldMaxDefault(), defEvery = shieldEveryDefault();
+
+  // what's set under "More options", shown on the button while it's closed
+  const summary = one
+    ? [t.color !== '' && t.color != null ? 'Color' : '', t.notes ? 'Notes' : ''].filter(Boolean)
+    : [repeating ? repeatText(Object.assign({}, t, { interval: +t.interval || 1 })) : '', !undated && earlyDaysOf(t) > 0 ? `Can start ${earlyDaysOf(t)}d early` : '',
+       t.notify ? 'Reminder' : '', repeating && t.streak ? 'Streak' : '', t.color !== '' && t.color != null ? 'Color' : '', t.notes ? 'Notes' : ''].filter(Boolean);
+
+  const colorField = `<div class="field"><label>Icon color</label><div class="swatches">
+        <button class="sw-auto${t.color === '' || t.color == null ? ' on' : ''}" data-act="ed-color" data-v="">Auto</button>
+        ${hueOrder.map(i => `<button class="swatch${String(t.color) === String(i) ? ' on' : ''}" style="background:var(--cat${i})" data-act="ed-color" data-v="${i}" aria-label="Color ${i + 1}"></button>`).join('')}
+      </div></div>`;
+  const notesField = `<div class="field"><label>Notes</label><textarea data-field="notes" rows="2" autocapitalize="sentences">${esc(t.notes || '')}</textarea></div>`;
+
+  const streakFields = !repeating ? '' : `
+      <div class="adv-group"><div class="adv-title">${solid('fa:fire-flame-curved', 'inline')}Streak</div>
+      <label class="toggle"><input type="checkbox" data-field="streak" ${t.streak ? 'checked' : ''}><span class="sw"></span>
+        <span><b>Track streak</b><span class="muted small">Shows in Streaks on Today and its tag page</span></span></label>
+      ${t.streak ? `<label class="toggle"><input type="checkbox" data-field="_pin" ${t._pin ? 'checked' : ''}${pinFull ? ' disabled' : ''}><span class="sw"></span>
+        <span><b>Pin to Overview</b><span class="muted small">${pinFull ? '5 streaks are already pinned. Unpin one first.' : 'Up to 5 streaks show at the bottom of Overview'}</span></span></label>
+      <div class="field inline"><label>Goal (optional)</label><input type="number" min="1" max="999" data-field="streakGoal" class="num" value="${esc(t.streakGoal || '')}" placeholder="e.g. 30"><span class="muted">in a row</span></div>
+      <div class="field inline"><label>Shields</label><input type="number" min="0" max="10" data-field="shieldMax" class="num" value="${esc(t.shieldMax ?? '')}" placeholder="${defMax}" inputmode="numeric"><span class="muted">can be saved up</span></div>
+      <div class="field inline"><label>Earn one every</label><input type="number" min="1" max="99" data-field="shieldEvery" class="num" value="${esc(t.shieldEvery ?? '')}" placeholder="${defEvery}" inputmode="numeric"><span class="muted">done in a row</span></div>
+      <div class="muted small">A shield covers a missed day instead of breaking the streak. 0 shields turns them off. Leave blank to use your defaults from Settings (${defMax} shields, one every ${defEvery}).</div>` : ''}</div>`;
+
+  const advSeries = `
+      <div class="adv-group"><div class="adv-title">${icon('repeat', 'inline')}Repeat</div>
+      <div class="seg">${['none', 'daily', 'weekly', 'monthly', 'yearly'].map(r =>
           `<button class="${(t.repeat || 'none') === r ? 'on' : ''}" data-act="ed-repeat" data-v="${r}">${r === 'none' ? 'Once' : r[0].toUpperCase() + r.slice(1)}</button>`).join('')}</div>
-      </div>
       ${repeating ? `<div class="field inline"><label>Every</label><input type="number" min="1" max="99" data-field="interval" value="${t.interval || 1}" class="num"><span>${unit}${(+t.interval || 1) > 1 ? 's' : ''}</span></div>` : ''}
       ${t.repeat === 'weekly' ? `<div class="field"><label>On</label><div class="wds">${[1, 2, 3, 4, 5, 6, 0].map(d =>
         `<button class="${wds.includes(d) ? 'on' : ''}" data-act="ed-wd" data-v="${d}">${DOW[d][0]}${DOW[d][1]}</button>`).join('')}</div></div>` : ''}
       ${t.repeat === 'monthly' ? `<div class="field inline"><label>Day of month</label><input type="number" min="1" max="31" data-field="dayOfMonth" class="num" value="${t.dayOfMonth || +t.start.slice(8)}"></div>` : ''}
-      ${repeating ? `<div class="field inline"><label>Ends (optional)</label><input type="date" data-field="end" value="${t.end || ''}"></div>` : ''}
-      <div class="field"><label>Category</label><div class="combo">
-        <input data-field="category" id="cat-input" value="${esc(t.category || '')}" placeholder="Choose or type a new one" autocomplete="off">
-        ${t.category ? `<button type="button" class="iconbtn faint combo-clear" data-act="cat-pick" data-v="" aria-label="Clear category">${icon('x')}</button>` : ''}
-        <div class="combo-list" id="cat-list" hidden></div></div></div>
-      <label class="toggle"><input type="checkbox" data-field="early" ${t.early ? 'checked' : ''}><span class="sw"></span>
-        <span><b>Can be done early</b><span class="muted small">Shows in This Week’s To-do ahead of its due day</span></span></label>
+      ${repeating ? `<div class="field inline"><label>Ends (optional)</label><input type="date" data-field="end" value="${t.end || ''}"></div>` : ''}</div>
+      ${undated ? '' : `<div class="adv-group"><div class="adv-title">${icon('clock', 'inline')}Timing</div>
+      <div class="field inline early"><label>Can start</label><input type="number" min="0" max="60" data-field="earlyDays" class="num" value="${earlyDaysOf(t)}" inputmode="numeric"><span>day${earlyDaysOf(t) === 1 ? '' : 's'} before it’s due</span>
+        <span class="muted small full">0 means only on the day. Shows faded in This Week’s To-do until then, and counts in the week chart once it can be started.</span></div>
       <label class="toggle"><input type="checkbox" data-field="notify" ${t.notify ? 'checked' : ''}><span class="sw"></span>
-        <span><b>Phone reminder</b><span class="muted small">Push via ntfy at the task’s time${t.time ? '' : ' (set a time first)'}</span></span></label>
-      ${repeating ? `<label class="toggle"><input type="checkbox" data-field="streak" ${t.streak ? 'checked' : ''}><span class="sw"></span>
-        <span><b>Track streak</b><span class="muted small">Shows in Streaks on Today and its tag page</span></span></label>
-      ${t.streak ? `<label class="toggle"><input type="checkbox" data-field="_pin" ${t._pin ? 'checked' : ''}${!t._pin && pinned().filter(id => id !== t.id).length >= 5 ? ' disabled' : ''}><span class="sw"></span>
-        <span><b>Pin to Overview</b><span class="muted small">${!t._pin && pinned().filter(id => id !== t.id).length >= 5 ? '5 streaks are already pinned. Unpin one first.' : 'Up to 5 streaks show at the bottom of Overview'}</span></span></label>` : ''}
-      ${t.streak ? `<div class="field inline"><label>Streak goal (optional)</label><input type="number" min="1" max="999" data-field="streakGoal" class="num" value="${esc(t.streakGoal || '')}" placeholder="e.g. 30"><span class="muted">in a row</span></div>` : ''}` : ''}
-      <div class="field"><label>Icon color</label><div class="swatches">
-        <button class="sw-auto${t.color === '' || t.color == null ? ' on' : ''}" data-act="ed-color" data-v="">Auto</button>
-        ${hueOrder.map(i => `<button class="swatch${String(t.color) === String(i) ? ' on' : ''}" style="background:var(--cat${i})" data-act="ed-color" data-v="${i}" aria-label="Color ${i + 1}"></button>`).join('')}
-      </div></div>
-      <div class="field"><label>Notes</label><textarea data-field="notes" rows="2">${esc(t.notes || '')}</textarea></div>
+        <span><b>Phone reminder</b><span class="muted small">Push via ntfy at the task’s time${t.time ? '' : ' (set a time first)'}</span></span></label></div>`}
+      ${streakFields}
+      <div class="adv-group"><div class="adv-title">${icon('palette', 'inline')}Look &amp; notes</div>${colorField}${notesField}</div>`;
+
+  overlay().className = 'on sheet-mode';
+  overlay().innerHTML = `<div class="scrim" data-act="close"></div>
+  <div class="sheet" role="dialog" aria-label="Task">
+    <div class="sheet-head"><b>${t._new ? 'New task' : one ? 'Edit this day' : 'Edit task'}</b><span class="spacer"></span>
+      <button class="iconbtn" data-act="close" aria-label="Close">${icon('x')}</button></div>
+    <div class="sheet-body">
+      ${scope}
+      <div class="namerow">
+        <button class="iconpick" data-act="ed-picker" aria-label="Choose icon" style="--ic:${iconColor(t)}">${taskIcon(t)}</button>
+        <input data-field="name" value="${esc(t.name)}" placeholder="Task name" enterkeyhint="done" autocapitalize="sentences">
+      </div>
+      ${t._picker ? `<div class="picker"><input data-field="_q" value="${esc(t._q || '')}" placeholder="Search icons: laundry, meds, trash, cat…" autocomplete="off">
+        <div class="picker-grid" style="--ic:${iconColor(t)}">${pickerGridHTML()}</div>
+        <div class="muted small picker-note">${CATALOG ? CATALOG.length.toLocaleString() + ' icons · Font Awesome first, then Material' : 'Loading full icon set…'}</div></div>` : ''}
+      ${undated ? '' : `<div class="field two">
+        <div><label>${one ? 'Date' : repeating ? 'Starts' : 'Due date'}</label><input type="date" data-field="start" value="${t.start}"></div>
+        <div><label>Time (optional)</label><input type="time" data-field="time" value="${t.time || ''}"></div>
+      </div>`}
+      ${!repeating && !one ? `<label class="toggle"><input type="checkbox" data-act="ed-undated" ${undated ? 'checked' : ''}><span class="sw"></span>
+        <span><b>No date</b><span class="muted small">Lives in the Anytime section on Overview until it’s done</span></span></label>` : ''}
+      ${one ? '' : `<div class="field"><label>Category</label><div class="combo">
+        <input data-field="category" id="cat-input" value="${esc(t.category || '')}" placeholder="Choose or type a new one" autocomplete="off" autocapitalize="words">
+        ${t.category ? `<button type="button" class="iconbtn faint combo-clear" data-act="cat-pick" data-v="" aria-label="Clear category">${icon('x')}</button>` : ''}
+        <div class="combo-list" id="cat-list" hidden></div></div></div>`}
+      <button class="adv-toggle${adv ? ' open' : ''}" data-act="ed-adv" aria-expanded="${adv}">
+        <span class="adv-label">${icon('sliders-horizontal')}${adv ? 'Fewer options' : 'More options'}</span>
+        ${!adv && summary.length ? `<span class="adv-sum">${summary.map(x => `<span>${esc(x)}</span>`).join('')}</span>` : !adv ? `<span class="adv-sum muted">${one ? 'Color, notes' : 'Repeat, reminder, streak, color, notes'}</span>` : ''}
+        ${icon(adv ? 'chevron-up' : 'chevron-down')}</button>
+      ${adv ? `<div class="adv">${one ? colorField + notesField : advSeries}</div>` : ''}
       ${stats}
     </div>
     <div class="sheet-foot">
-      ${t._new ? '' : `<button class="btn danger" data-act="ed-delete">${icon('trash-2')}Delete</button>`}
+      ${t._new ? '' : one ? `<button class="btn" data-act="ed-skip">${icon('x')}Skip this day</button>` : `<button class="btn danger" data-act="ed-delete">${icon('trash-2')}Delete</button>`}
       <span class="spacer"></span>
       <button class="btn" data-act="close">Cancel</button>
       <button class="btn primary" data-act="ed-save">Save</button>
@@ -835,35 +998,65 @@ function iconDataFor(id) {
   const c = (CATALOG || []).find(x => x.id === id); return c ? c.vb + '|' + c.p : '';
 }
 
+const TASK_FIELDS = ['name', 'icon', 'iconData', 'color', 'category', 'start', 'time', 'repeat', 'interval', 'weekdays', 'dayOfMonth',
+  'end', 'early', 'earlyDays', 'notify', 'notes', 'streak', 'streakGoal', 'shieldMax', 'shieldEvery'];
+const ONE_FIELDS = ['name', 'icon', 'iconData', 'color', 'time', 'notes'];
+// Capitalize a title's first letter (leaves names like "iPhone" alone).
+const capFirst = x => /^[a-z](?![A-Z])/.test(x) ? x[0].toUpperCase() + x.slice(1) : x;
+const same = (a, b) => String(a == null ? '' : a) === String(b == null ? '' : b);
 function saveEditor() {
   const t = Object.assign({}, ed);
-  t.name = (t.name || '').trim();
+  t.name = capFirst((t.name || '').trim());
   if (!t.name) { const n = document.querySelector('[data-field=name]'); n && n.focus(); return; }
+  if (t._mode === 'one') return saveOneDay(t);
+  if (t.repeat !== 'none' && !t.start) t.start = ui.today;
   if (t.repeat === 'weekly' && !String(t.weekdays)) t.weekdays = String(Rec.weekday(t.start));
   if (t.repeat !== 'weekly') t.weekdays = '';
   if (t.repeat !== 'monthly') t.dayOfMonth = '';
   if (t.repeat === 'none') { t.interval = 1; t.end = ''; }
   t.interval = Math.max(1, parseInt(t.interval, 10) || 1);
   t.category = (t.category || '').trim();
-  const fromNote = t._fromNote, wantPin = !!t._pin;
-  delete t._new; delete t._picker; delete t._q; delete t._fromNote; delete t._pin;
+  const ed0 = parseInt(t.earlyDays, 10);
+  t.earlyDays = t.start && ed0 > 0 ? Math.min(ed0, 60) : 0;
+  t.early = t.earlyDays > 0;
+  const fromNote = t._fromNote, wantPin = !!t._pin, orig = t._orig, isNew = t._new;
+  Object.keys(t).forEach(k => { if (k[0] === '_') delete t[k]; });
   t.color = t.color === '' || t.color == null ? '' : String(t.color);
   t.streak = !!t.streak && t.repeat !== 'none';
   t.streakGoal = t.streak && parseInt(t.streakGoal, 10) > 0 ? String(parseInt(t.streakGoal, 10)) : '';
-  t.updatedAt = Date.now(); t.deleted = false;
+  // blank = use the defaults from Settings
+  t.shieldMax = t.shieldMax === '' || t.shieldMax == null || isNaN(parseInt(t.shieldMax, 10)) ? '' : String(intOr(t.shieldMax, 3, 0, 10));
+  t.shieldEvery = t.shieldEvery === '' || t.shieldEvery == null || isNaN(parseInt(t.shieldEvery, 10)) ? '' : String(intOr(t.shieldEvery, 6, 1, 99));
   closeOverlay();
-  if (fromNote && S.items[fromNote]) commit({ t: 'item', rec: Object.assign({}, S.items[fromNote], { deleted: true, updatedAt: Date.now() }) }, false);
-  commit({ t: 'task', rec: t });
+  if (fromNote && S.items[fromNote]) patchItem(fromNote, { deleted: true }, false);
+  if (isNew || !orig) { t.updatedAt = Date.now(); t.deleted = false; commit({ t: 'task', rec: t }); }
+  else {
+    // send only what changed, so this save can't undo edits made on another device
+    const patch = {};
+    TASK_FIELDS.forEach(f => { if (!same(t[f], orig[f])) patch[f] = t[f]; });
+    if (Object.keys(patch).length) patchTask(t.id, patch); else render();
+  }
   const pins = pinned().filter(id => id !== t.id);
   if (wantPin && t.streak && pins.length < 5) pins.push(t.id);
   if (JSON.stringify(pins) !== JSON.stringify(metaVal('pinnedStreaks', []) || [])) setMeta('pinnedStreaks', pins);
 }
+// "Just this day": store only the differences from the series, under that day's original date.
+function saveOneDay(e) {
+  const base = S.tasks[e.id], key = e._key; if (!base) return closeOverlay();
+  const ov = {};
+  ONE_FIELDS.forEach(f => { if (!same(e[f], base[f])) ov[f] = f === 'name' ? e.name : e[f]; });
+  if (ov.icon !== undefined || ov.iconData !== undefined) { ov.icon = e.icon; ov.iconData = e.iconData; }
+  if (e.start && e.start !== key) ov.date = e.start;
+  closeOverlay();
+  const had = ovOf(base.id, key);
+  if (Object.keys(ov).length || had) setOverride(base.id, key, Object.keys(ov).length ? ov : null);
+}
 
 // Rename (or with '' delete) a category everywhere: tasks, tag views, saved list.
 function renameCategory(from, to) {
-  const lf = from.toLowerCase(), now = Date.now();
+  const lf = from.toLowerCase();
   taskList().filter(t => (t.category || '').toLowerCase() === lf)
-    .forEach(t => commit({ t: 'task', rec: Object.assign({}, t, { category: to, updatedAt: now }) }, false));
+    .forEach(t => patchTask(t.id, { category: to }, false));
   const vs = views().map(v => Object.assign({}, v, { cats: [...new Set((v.cats || []).map(c => c.toLowerCase() === lf ? to : c).filter(Boolean))] }));
   if (JSON.stringify(vs) !== JSON.stringify(views())) setMeta('views', vs);
   let list = (metaVal('categories', []) || []).filter(c => c.toLowerCase() !== lf);
@@ -901,6 +1094,10 @@ function openSettings(section) {
           return `<div class="cat-row"><input data-cat-rename="${esc(c)}" value="${esc(c)}"><span class="muted small">${n} task${n === 1 ? '' : 's'}</span>
             <button class="iconbtn faint" data-act="cat-del" data-v="${esc(c)}" aria-label="Delete ${esc(c)}">${icon('x')}</button></div>`; }).join('') || '<div class="muted small">No categories yet.</div>'}
         <div class="cat-row"><input id="cat-new" placeholder="New category" enterkeyhint="done"><span></span><button class="iconbtn faint" data-act="cat-add" aria-label="Add">${icon('plus')}</button></div></div>
+      <div class="field" id="sec-streaks"><label>Streak shields</label>
+        <span class="muted small">A shield covers a missed day instead of breaking a streak. These are the defaults; any task can use its own under More options.</span>
+        <div class="field inline"><input type="number" id="set-shield-max" class="num" min="0" max="10" value="${shieldMaxDefault()}" inputmode="numeric"><span>shields can be saved up (0 turns them off)</span></div>
+        <div class="field inline"><span>Earn one every</span><input type="number" id="set-shield-every" class="num" min="1" max="99" value="${shieldEveryDefault()}" inputmode="numeric"><span>done in a row</span></div></div>
       <div class="field"><label>Photo layout</label><div class="seg">${[['auto', 'Auto'], ['banner', 'Banner'], ['background', 'Full background']].map(([k, l]) =>
         `<button class="${metaVal('photoLayout', 'auto') === k ? 'on' : ''}" data-act="set-layout" data-v="${k}">${l}</button>`).join('')}</div>
         <span class="muted small">Auto uses large photos as the full background and wide strips as a banner.</span></div>
@@ -969,21 +1166,25 @@ document.addEventListener('click', e => {
     case 'set-status': {
       closeOverlay();
       const tk = S.tasks[d.task], before = streakInfo(tk);
-      commit({ t: 'status', taskId: d.task, date: d.date, status: d.status, updatedAt: Date.now() });
+      setStatus(d.task, d.date, d.status);
       streakMemo = {};
       const after = streakInfo(tk);
       if (after && after.goal && before && before.cur < after.goal && after.cur >= after.goal) toast(`${solid('fa:trophy')}Goal reached! <b>${esc(tk.name)}</b>: ${after.goal} in a row`);
-      else if (after && before && after.graces > before.graces) toast(`${solid('fa:shield-halved')}<b>${esc(tk.name)}</b>: earned a grace day (${after.graces}/3)`);
+      else if (after && before && after.graces > before.graces) toast(`${solid('fa:shield-halved')}<b>${esc(tk.name)}</b>: earned a shield (${after.graces}/${after.max})`);
       break;
     }
-    case 'edit-task': openEditor(d.task); break;
-    case 'new-task': openEditor(null, { date: d.date, early: d.early === '1', cat: d.cat || (ui.tab === 'tags' && (views().find(v => v.id === ui.view) || {}).cats ? views().find(v => v.id === ui.view).cats[0] : '') }); break;
+    case 'edit-task': openEditor(d.task, { key: d.key }); break;
+    case 'ed-scope': if (ed && ed._key && ed._mode !== d.v) setEdMode(d.v); break;
+    case 'ed-reset-one': if (ed && ed._key) { const id = ed.id, key = ed._key; closeOverlay(); setOverride(id, key, null); } break;
+    case 'ed-skip': if (ed && ed._key) { const id = ed.id, key = ed._key; closeOverlay(); setStatus(id, key, 'not_needed'); } break;
+    case 'ed-undated': if (ed) { ed.start = el.checked ? '' : (ed._orig && ed._orig.start) || ui.today; renderEditor(); } break;
+    case 'new-task': openEditor(null, { date: d.date, undated: d.undated === '1', cat: d.cat || (ui.tab === 'tags' && (views().find(v => v.id === ui.view) || {}).cats ? views().find(v => v.id === ui.view).cats[0] : '') }); break;
     case 'tab': ui.tab = d.tab; LS.set('tab', d.tab); render(); break;
     case 'view': ui.view = d.view; LS.set('view', d.view); render(); break;
     case 'note-to-task': { const n = S.items[d.item]; if (n) openEditor(null, { name: n.text, fromNote: n.id }); break; }
     case 'notes-clear':
       Object.values(S.items).filter(i => i.listId === '__notes' && i.checked)
-        .forEach(i => commit({ t: 'item', rec: Object.assign({}, i, { deleted: true, updatedAt: Date.now() }) }, false));
+        .forEach(i => patchItem(i.id, { deleted: true }, false));
       render(); break;
     case 'pick-page-icon': {
       const key = d.key, label = (MONTHS.find(m => m.key === key) || {}).label || (HOLIDAYS[key] || {}).label;
@@ -1054,16 +1255,16 @@ document.addEventListener('click', e => {
       if (name === null) break;
       if (!name.trim()) {
         if (!confirm(`Delete the list “${cur.name}” and its items?`)) break;
-        Object.values(S.items).filter(i => i.listId === cur.id).forEach(i => commit({ t: 'item', rec: Object.assign({}, i, { deleted: true, updatedAt: Date.now() }) }, false));
+        Object.values(S.items).filter(i => i.listId === cur.id).forEach(i => patchItem(i.id, { deleted: true }, false));
         setMeta('lists', lists.filter(l => l.id !== cur.id));
       } else setMeta('lists', lists.map(l => l.id === cur.id ? { id: l.id, name: name.trim() } : l));
       break;
     }
-    case 'item-toggle': { const i = S.items[d.item]; commit({ t: 'item', rec: Object.assign({}, i, { checked: !i.checked, updatedAt: Date.now() }) }); break; }
-    case 'item-del': { const i = S.items[d.item]; commit({ t: 'item', rec: Object.assign({}, i, { deleted: true, updatedAt: Date.now() }) }); break; }
+    case 'item-toggle': { const i = S.items[d.item]; if (i) patchItem(i.id, { checked: !i.checked }); break; }
+    case 'item-del': { const i = S.items[d.item]; if (i) patchItem(i.id, { deleted: true }); break; }
     case 'items-clear':
       Object.values(S.items).filter(i => i.listId === d.list && i.checked)
-        .forEach(i => commit({ t: 'item', rec: Object.assign({}, i, { deleted: true, updatedAt: Date.now() }) }, false));
+        .forEach(i => patchItem(i.id, { deleted: true }, false));
       render(); break;
     case 'settings': openSettings(d.sec); break;
     case 'toggle-done': ui.showDone = ui.showDone || {}; ui.showDone[d.tid] = !ui.showDone[d.tid]; render(); break;
@@ -1076,7 +1277,7 @@ document.addEventListener('click', e => {
       ed._picker = false; renderEditor(); break;
     }
     case 'ed-color': ed.color = d.v; renderEditor(); break;
-    case 'ed-repeat': ed.repeat = d.v; if (d.v === 'weekly' && !String(ed.weekdays)) ed.weekdays = String(Rec.weekday(ed.start)); renderEditor(); break;
+    case 'ed-repeat': ed.repeat = d.v; if (d.v !== 'none' && !ed.start) ed.start = ui.today; if (d.v === 'weekly' && !String(ed.weekdays)) ed.weekdays = String(Rec.weekday(ed.start)); renderEditor(); break;
     case 'ed-wd': {
       let w = Rec.weekdaysOf(ed); const v = +d.v;
       w = w.includes(v) ? w.filter(x => x !== v) : [...w, v];
@@ -1084,6 +1285,7 @@ document.addEventListener('click', e => {
       ed.weekdays = w.sort().join(','); renderEditor(); break;
     }
     case 'ed-save': saveEditor(); break;
+    case 'ed-adv': if (ed) { ed._adv = !ed._adv; ui.edAdv = ed._adv; renderEditor(); } break;
     case 'cat-pick': {
       if (!ed) break;
       ed.category = d.v; const inp = document.getElementById('cat-input'); if (inp) inp.value = d.v;
@@ -1094,7 +1296,7 @@ document.addEventListener('click', e => {
     }
     case 'ed-delete':
       if (!confirm(`Delete “${ed.name}”${ed.repeat !== 'none' ? ' and all its future repeats' : ''}?`)) break;
-      { const rec = Object.assign({}, S.tasks[ed.id], { deleted: true, updatedAt: Date.now() }); closeOverlay(); commit({ t: 'task', rec }); }
+      { const id = ed.id; closeOverlay(); patchTask(id, { deleted: true }); }
       break;
     case 'set-layout': setMeta('photoLayout', d.v); openSettings(); break;
     case 'st-connect': connect(document.getElementById('set-url').value, document.getElementById('set-key').value); break;
@@ -1129,6 +1331,8 @@ document.addEventListener('change', e => {
   const t = e.target;
   if (t.id === 'set-title' && t.value.trim()) setMeta('title', t.value.trim());
   if (t.id === 'set-holidays') setMeta('holidays', t.checked);
+  if (t.id === 'set-shield-max') { const v = intOr(t.value, 3, 0, 10); t.value = v; setMeta('shieldMax', v); }
+  if (t.id === 'set-shield-every') { const v = intOr(t.value, 6, 1, 99); t.value = v; setMeta('shieldEvery', v); }
   if (t.id === 'set-theme') setMeta('theme', t.value);
   if (t.dataset.catRename !== undefined) {
     const from = t.dataset.catRename, to = t.value.trim();
@@ -1143,8 +1347,9 @@ document.addEventListener('change', e => {
   if (t.id === 'set-motion') { LS.set('motion', t.checked); applyTheme(); }
   if (t.dataset.itemEdit) {
     const i = S.items[t.dataset.itemEdit];
-    if (!t.value.trim()) commit({ t: 'item', rec: Object.assign({}, i, { deleted: true, updatedAt: Date.now() }) });
-    else if (t.value !== i.text) commit({ t: 'item', rec: Object.assign({}, i, { text: t.value.trim(), updatedAt: Date.now() }) }, false);
+    if (!i) return;
+    if (!t.value.trim()) patchItem(i.id, { deleted: true });
+    else if (t.value.trim() !== i.text) patchItem(i.id, { text: t.value.trim() }, false);
   }
 });
 document.addEventListener('focusin', e => {
@@ -1155,25 +1360,66 @@ document.addEventListener('focusout', e => {
 });
 document.addEventListener('keydown', e => {
   if (e.key === 'Escape' && overlay().innerHTML) closeOverlay();
-  if (e.key === 'Enter' && e.target.classList.contains('new-item') && e.target.value.trim()) {
+  if (e.key === 'Enter' && e.target.classList.contains('new-item')) {
+    e.preventDefault();
     const lid = e.target.dataset.list;
-    const sorts = Object.values(S.items).filter(i => i.listId === lid).map(i => i.sort);
-    commit({ t: 'item', rec: { id: uid(), listId: lid, text: e.target.value.trim(), checked: false,
-      sort: (sorts.length ? Math.max(...sorts) : 0) + 1, updatedAt: Date.now(), deleted: false } });
-    const n = document.querySelector(`.new-item[data-list="${lid}"]`); n && n.focus();
-  }
-  if (e.key === 'Enter' && e.target.id === 'new-note' && e.target.value.trim()) {
-    const sorts = Object.values(S.items).filter(i => i.listId === '__notes').map(i => i.sort);
-    commit({ t: 'item', rec: { id: uid(), listId: '__notes', text: e.target.value.trim(), checked: false,
-      sort: (sorts.length ? Math.max(...sorts) : 0) + 1, updatedAt: Date.now(), deleted: false } });
-    const n = document.getElementById('new-note'); n && n.focus();
+    if (addFromInput(e.target)) { const n = document.querySelector(`.new-item[data-list="${lid}"]`); n && n.focus(); }
   }
   if (e.key === 'Enter' && e.target.id === 'cat-new') { e.preventDefault(); document.querySelector('[data-act=cat-add]').click(); }
   if (e.key === 'Enter' && e.target.id === 'cat-input') { e.preventDefault(); const v = e.target.value.trim(); const hit = allCategories().find(c => c.toLowerCase() === v.toLowerCase());
     const b = document.createElement('button'); b.dataset.act = 'cat-pick'; b.dataset.v = hit || v; document.body.appendChild(b); b.click(); b.remove(); }
   if (e.key === 'Enter' && e.target.dataset.field === 'name') saveEditor();
-  if (e.key === 'Enter' && e.target.dataset.itemEdit) e.target.blur();
+  if (e.key === 'Enter' && e.target.dataset.itemEdit) { e.preventDefault(); e.target.blur(); }
 });
+
+// Turn what's typed in an "Add item" box into a new list item. Returns true if one was added.
+function addFromInput(el) {
+  const text = (el.value || '').trim(), lid = el.dataset.list;
+  if (!text || !lid) return false;
+  el.value = '';
+  const sorts = Object.values(S.items).filter(i => i.listId === lid).map(i => i.sort);
+  newItem({ id: uid(), listId: lid, text, sort: (sorts.length ? Math.max(...sorts) : 0) + 1 });
+  return true;
+}
+// Leaving the box (tapping elsewhere) keeps what was typed as an item.
+document.addEventListener('focusout', e => {
+  if (e.target.classList && e.target.classList.contains('new-item') && e.target.value.trim()) setTimeout(() => addFromInput(e.target), 0);
+});
+// Closing the phone keyboard (back gesture) doesn't move focus, so watch the screen grow back instead.
+if (window.visualViewport) {
+  let vh = visualViewport.height;
+  visualViewport.addEventListener('resize', () => {
+    const h = visualViewport.height, grew = h - vh > 120; vh = h;
+    const a = document.activeElement;
+    if (grew && a && a.classList.contains('new-item')) { if (a.value.trim()) addFromInput(a); else a.blur(); }
+    else if (grew && a && a.dataset && a.dataset.itemEdit) a.blur();
+  });
+}
+// auto-grow checklist text boxes so long items wrap instead of being cut off
+function fitTextareas(root = document) { root.querySelectorAll('.item textarea').forEach(fitTA); }
+function fitTA(ta) { ta.style.height = 'auto'; ta.style.height = ta.scrollHeight + 'px'; }
+document.addEventListener('input', e => { if (e.target.matches && e.target.matches('.item textarea')) fitTA(e.target); });
+
+/* swipe a checklist row left to reveal its delete button */
+let isw = null;
+const closeSwipes = except => { if (!except) ui.openRow = null; document.querySelectorAll('.item.swipe.open').forEach(r => { if (r !== except) r.classList.remove('open'); }); };
+document.addEventListener('touchstart', e => {
+  const row = e.target.closest('.item.swipe');
+  if (!row) { if (!e.target.closest('.item-x')) closeSwipes(); isw = null; return; }
+  isw = { row, x: e.touches[0].clientX, y: e.touches[0].clientY, dx: 0, on: false, open: row.classList.contains('open') };
+}, { passive: true });
+document.addEventListener('touchmove', e => {
+  if (!isw) return;
+  const dx = e.touches[0].clientX - isw.x, dy = e.touches[0].clientY - isw.y;
+  if (!isw.on) { if (Math.abs(dy) > 10 && Math.abs(dy) > Math.abs(dx)) { isw = null; return; } if (Math.abs(dx) > 10) { isw.on = true; isw.row.classList.add('dragging'); closeSwipes(isw.row); } }
+  if (isw.on) { isw.dx = dx; const x = Math.max(-72, Math.min(0, (isw.open ? -56 : 0) + dx)); isw.row.style.setProperty('--sx', x + 'px'); }
+}, { passive: true });
+document.addEventListener('touchend', () => {
+  if (!isw) return;
+  const { row, on, dx, open } = isw; isw = null;
+  row.classList.remove('dragging'); row.style.removeProperty('--sx');
+  if (on) { const o = open ? dx < 30 : dx < -40; row.classList.toggle('open', o); ui.openRow = o ? row.dataset.row : null; }
+}, { passive: true });
 
 /* refresh when coming back to the app, at midnight, and periodically */
 function tick() {
@@ -1221,7 +1467,7 @@ window.addEventListener('scroll', () => { if (!cpRaf) cpRaf = requestAnimationFr
 /* swipe left/right between tabs on touch screens */
 let sw0 = null;
 document.addEventListener('touchstart', e => {
-  if (overlay().innerHTML || e.touches.length !== 1 || e.target.closest('.filters, .tabs, .wk-grid, input, textarea, .nav')) { sw0 = null; return; }
+  if (overlay().innerHTML || e.touches.length !== 1 || e.target.closest('.filters, .tabs, .wk-grid, input, textarea, .nav, .item')) { sw0 = null; return; }
   sw0 = { x: e.touches[0].clientX, y: e.touches[0].clientY, t: Date.now() };
 }, { passive: true });
 document.addEventListener('touchend', e => {

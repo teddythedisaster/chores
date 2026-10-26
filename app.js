@@ -120,7 +120,7 @@ const setMeta = (key, value) => commit({ t: 'meta', key, value, updatedAt: Date.
 
 /* ================= sync with Apps Script ================= */
 let flushTimer = null, inflight = false, retryMs = 4000;
-const BACKEND_VERSION = 5; // matches VERSION in Code.gs
+const BACKEND_VERSION = 6; // matches VERSION in Code.gs
 function scheduleFlush(ms = 350) { clearTimeout(flushTimer); flushTimer = setTimeout(flush, ms); }
 function setSync(s, msg = '') { ui.sync = s; ui.syncMsg = msg; const el = document.getElementById('sync'); if (el) el.outerHTML = syncBadge(); }
 
@@ -428,8 +428,8 @@ function syncBadge() {
   return `<button id="sync" class="iconbtn sync-${ui.sync}" data-act="sync" title="${esc(tip)}" aria-label="${esc(tip)}">${icon(ic, ui.sync === 'syncing' ? 'spin' : '')}${pending}</button>`;
 }
 
-function pill(st, attrs = '') {
-  return `<button class="pill" style="--c:var(--st-${st})" ${attrs}><span class="dot"></span>${statusLabel(st)}</button>`;
+function pill(st, attrs = '', tag = 'button') {
+  return `<${tag} class="pill" style="--c:var(--st-${st})" ${attrs}><span class="dot"></span>${statusLabel(st)}</${tag}>`;
 }
 
 function rowHTML(it, mode) {
@@ -793,7 +793,7 @@ function openStatusMenu(btn) {
   overlay().innerHTML = `<div class="scrim" data-act="close"></div>
     <div class="menu" style="left:${Math.min(r.left, innerWidth - 200)}px;top:${Math.max(8, Math.min(r.bottom + 4, innerHeight - 300))}px">
       ${STATUSES.map(s => `<button class="menu-item${s.id === cur ? ' cur' : ''}" data-act="set-status" data-task="${task}" data-date="${date}" data-status="${s.id}">
-        ${pill(s.id, 'tabindex="-1"')}${s.id === cur ? icon('check') : ''}</button>`).join('')}
+        ${pill(s.id, '', 'span')}${s.id === cur ? icon('check') : ''}</button>`).join('')}
     </div>`;
 }
 
@@ -854,7 +854,7 @@ function renderEditor() {
   const summary = one
     ? [t.color !== '' && t.color != null ? 'Color' : '', t.notes ? 'Notes' : ''].filter(Boolean)
     : [repeating ? repeatText(Object.assign({}, t, { interval: +t.interval || 1 })) : '', !undated && earlyDaysOf(t) > 0 ? `Can start ${earlyDaysOf(t)}d early` : '',
-       t.notify ? 'Reminder' : '', repeating && t.streak ? 'Streak' : '', t.color !== '' && t.color != null ? 'Color' : '', t.notes ? 'Notes' : ''].filter(Boolean);
+       t.notify ? (t.notifyTime || t.time ? 'Reminder ' + fmt12(t.notifyTime || t.time) : 'Reminder (no time yet)') : '', repeating && t.streak ? 'Streak' : '', t.color !== '' && t.color != null ? 'Color' : '', t.notes ? 'Notes' : ''].filter(Boolean);
 
   const colorField = `<div class="field"><label>Icon color</label><div class="swatches">
         <button class="sw-auto${t.color === '' || t.color == null ? ' on' : ''}" data-act="ed-color" data-v="">Auto</button>
@@ -886,7 +886,9 @@ function renderEditor() {
       <div class="field inline early"><label>Can start</label><input type="number" min="0" max="60" data-field="earlyDays" class="num" value="${earlyDaysOf(t)}" inputmode="numeric"><span>day${earlyDaysOf(t) === 1 ? '' : 's'} before it’s due</span>
         <span class="muted small full">0 means only on the day. Shows faded in This Week’s To-do until then, and counts in the week chart once it can be started.</span></div>
       <label class="toggle"><input type="checkbox" data-field="notify" ${t.notify ? 'checked' : ''}><span class="sw"></span>
-        <span><b>Phone reminder</b><span class="muted small">Push via ntfy at the task’s time${t.time ? '' : ' (set a time first)'}</span></span></label></div>`}
+        <span><b>Phone reminder</b><span class="muted small">Push via ntfy</span></span></label>
+      ${t.notify ? `<div class="field inline"><label>Remind me at</label><input type="time" data-field="notifyTime" value="${esc(t.notifyTime || '')}"></div>
+        <div class="muted small" id="notify-hint">${notifyHint(t)}</div>` : ''}</div>`}
       ${streakFields}
       <div class="adv-group"><div class="adv-title">${icon('palette', 'inline')}Look &amp; notes</div>${colorField}${notesField}</div>`;
 
@@ -998,8 +1000,13 @@ function iconDataFor(id) {
   const c = (CATALOG || []).find(x => x.id === id); return c ? c.vb + '|' + c.p : '';
 }
 
+// When the phone reminder goes off: its own time if set, otherwise the task's time.
+function notifyHint(t) {
+  if (t.notifyTime) return t.time && t.time !== t.notifyTime ? `Reminder at ${fmt12(t.notifyTime)}; the task itself stays at ${fmt12(t.time)}.` : 'The task itself doesn’t need a time.';
+  return t.time ? `Leave blank to be reminded at the task’s time (${fmt12(t.time)}).` : 'Pick a time for the reminder. The task itself doesn’t need one.';
+}
 const TASK_FIELDS = ['name', 'icon', 'iconData', 'color', 'category', 'start', 'time', 'repeat', 'interval', 'weekdays', 'dayOfMonth',
-  'end', 'early', 'earlyDays', 'notify', 'notes', 'streak', 'streakGoal', 'shieldMax', 'shieldEvery'];
+  'end', 'early', 'earlyDays', 'notify', 'notifyTime', 'notes', 'streak', 'streakGoal', 'shieldMax', 'shieldEvery'];
 const ONE_FIELDS = ['name', 'icon', 'iconData', 'color', 'time', 'notes'];
 // Capitalize a title's first letter (leaves names like "iPhone" alone).
 const capFirst = x => /^[a-z](?![A-Z])/.test(x) ? x[0].toUpperCase() + x.slice(1) : x;
@@ -1323,7 +1330,8 @@ document.addEventListener('input', e => {
     if (f === '_q') { clearTimeout(ui.qT); ui.qT = setTimeout(refreshPicker, 120); }
     if (f === 'category') { const ip = document.querySelector('.iconpick'); if (ip) ip.style.setProperty('--ic', iconColor(ed));
       const l = document.getElementById('cat-list'); if (l) { l.innerHTML = comboListHTML(e.target.value); l.hidden = false; } }
-    if (f === 'streak') renderEditor();
+    if (f === 'streak' || f === 'notify') renderEditor();
+    if (f === 'notifyTime' || f === 'time') { const h = document.getElementById('notify-hint'); if (h) h.textContent = notifyHint(ed); }
     if (f === 'interval') { const s = e.target.nextElementSibling; if (s) s.textContent = { daily: 'day', weekly: 'week', monthly: 'month', yearly: 'year' }[ed.repeat] + ((+ed.interval || 1) > 1 ? 's' : ''); }
   }
 });

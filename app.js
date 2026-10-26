@@ -293,6 +293,14 @@ function photoLayout(banner) {
   return long >= 1600 && short >= 900 && info.w / info.h <= 2.4 ? 'background' : 'banner';
 }
 
+// Browser-tab icon follows the month/holiday icon in the day's accent color.
+function setTabIcon(color) {
+  const svg = pageIconHTML().replace('<svg ', `<svg xmlns="http://www.w3.org/2000/svg" style="color:${color}" `).replace('fill="currentColor"', `fill="${color}"`);
+  const href = 'data:image/svg+xml,' + encodeURIComponent(svg);
+  let l = document.querySelector('link[rel=icon]');
+  if (!l) { l = document.createElement('link'); l.rel = 'icon'; document.head.appendChild(l); }
+  if (l.getAttribute('href') !== href) { l.setAttribute('href', href); l.type = 'image/svg+xml'; }
+}
 function applyTheme() {
   const { holiday, monthIdx } = activeTheme();
   const tk = themeTokens(), root = document.documentElement.style;
@@ -301,6 +309,7 @@ function applyTheme() {
   tk.cats.forEach((c, i) => root.setProperty('--cat' + i, c));
   ui.cats = tk.cats;
   const m = document.querySelector('meta[name=theme-color]'); if (m) m.content = tk.vars.bg;
+  setTabIcon(tk.vars.accent);
   const [kind, colors] = particlesFor(monthIdx, holiday);
   Particles.set(kind, colors, LS.get('motion', true));
 }
@@ -908,7 +917,7 @@ function openSettings(section) {
       ${link ? `<div class="field"><label>Link for your other device</label><div class="muted small">Open this link once on your phone or laptop to connect it automatically. Keep it private, since it contains your key.</div>
         <div class="btnrow"><button class="btn" data-act="st-copy" data-link="${esc(link)}">${icon('copy')}Copy link</button>
         <button class="btn" data-act="st-test">${icon('bell-ring')}Send test notification</button></div></div>` : ''}
-      <div class="field" id="sec-icons"><label>Month &amp; holiday icons</label><span class="muted small">Tap one to choose a different icon.</span><div class="icon-tiles">
+      <div class="field" id="sec-icons"><label>Month &amp; holiday icons</label><span class="muted small">Tap one to choose a different icon. If the icon updater is set up on GitHub, your home-screen icon follows these too (it checks once a day).</span><div class="icon-tiles">
         ${[...MONTHS.map(m => [m.key, m.label.slice(0, 3), m.icon]), ...Object.entries(HOLIDAYS).map(([k, h]) => [k, h.label.replace("'s Day", '').replace('Fourth of July', 'July 4'), h.icon])].map(([k, l, def]) => {
           const pick = (metaVal('pageIcons', {}) || {})[k];
           const ic = pick && pick.data ? svgPath(pick.data.split('|')[0], pick.data.slice(pick.data.indexOf('|') + 1)) : solid(def);

@@ -68,11 +68,23 @@ function taskIcon(t) {
   return solid('fa:circle', 'dotfallback');
 }
 function hashStr(x) { let h = 0; for (const c of String(x)) h = (h * 31 + c.charCodeAt(0)) >>> 0; return h; }
+// Icon color slot (0–7, or -1 = accent): the task's own color, else its category's color.
 function catSlot(t) {
   if (t.color !== '' && t.color != null && !isNaN(+t.color)) return +t.color;
-  return t.category ? hashStr(t.category.toLowerCase()) % 8 : -1;
+  return catColorSlot(t.category);
 }
-const iconColor = t => { const sl = catSlot(t); return sl < 0 ? 'var(--accent)' : `var(--cat${sl})`; };
+// A category's color: picked in Settings (meta catColors), else a stable automatic one.
+function catColorSlot(c) {
+  if (!c) return -1;
+  const m = metaVal('catColors', {}) || {}, k = c.trim().toLowerCase();
+  if (m[k] !== undefined && m[k] !== '' && !isNaN(+m[k])) return +m[k];
+  return hashStr(c.toLowerCase()) % 8;
+}
+const slotColor = sl => sl < 0 ? 'var(--accent)' : `var(--cat${sl})`;
+const viewSlot = v => catColorSlot((v.cats || [])[0] || '');
+const iconColor = t => slotColor(catSlot(t));
+// the 8 theme colors in rainbow order (they change with each photo, so sort by hue)
+const hueOrder = () => (ui.cats || []).map((c, i) => [Palette.rgb2hsl(...c.match(/\w\w/g).map(x => parseInt(x, 16)))[0], i]).sort((a, b) => a[0] - b[0]).map(x => x[1]);
 function taskList() { return Object.values(S.tasks).filter(t => !t.deleted); }
 function passesFilter(t) { return ui.filter === 'All' || (t.category || '') === ui.filter; }
 
@@ -252,14 +264,25 @@ function todayItems(pred = passesFilter) {
     const it = inst(t, p, { overdue: true });
     if (it.date < today && !FINISHED[stOf(it)]) out.push(it);
   });
-  const rank = it => it.overdue ? 0 : FINISHED[stOf(it)] ? 2 : 1;
-  return out.sort((a, b) => rank(a) - rank(b) || (a.overdue ? a.date.localeCompare(b.date) : 0) || byTime(a, b));
+  // then anything from the week that can already be started, at the bottom ("early")
+  weekItems(pred).forEach(it => {
+    if (it.date > today && availableNow(it) && !out.some(o => o.t.id === it.t.id)) out.push(Object.assign({}, it, { early: true }));
+  });
+  const rank = it => FINISHED[stOf(it)] ? 3 : it.overdue ? 0 : it.early ? 2 : 1;
+  return out.sort((a, b) => rank(a) - rank(b) || ((a.overdue || a.early) ? a.date.localeCompare(b.date) : 0) || byTime(a, b));
 }
+// Today's chart counts only what's due today (or overdue), not tasks done early.
+const dueToday = items => items.filter(it => !it.early);
 // The week: every task that isn't an every-day one, due today through the next 6 days.
+// A repeating task shows only its next occurrence (the first one not finished yet).
+// Order: what can be done now (by date), then what's coming up (by date).
 function weekItems(pred = passesFilter) {
-  const out = [];
-  for (let k = 0; k < 7; k++) out.push(...instancesOn(Rec.addDays(ui.today, k), t => pred(t) && !isDailyTask(t)));
-  return out.sort((a, b) => a.date.localeCompare(b.date) || byTime(a, b));
+  const all = [];
+  for (let k = 0; k < 7; k++) all.push(...instancesOn(Rec.addDays(ui.today, k), t => pred(t) && !isDailyTask(t)));
+  all.sort((a, b) => a.date.localeCompare(b.date) || byTime(a, b));
+  const next = new Map();
+  all.forEach(it => { const cur = next.get(it.t.id); if (!cur || (FINISHED[stOf(cur)] && !FINISHED[stOf(it)])) next.set(it.t.id, it); });
+  return [...next.values()].sort((a, b) => availableNow(b) - availableNow(a) || a.date.localeCompare(b.date) || byTime(a, b));
 }
 // The week chart only counts what can be done now.
 const weekNowItems = (pred = passesFilter) => weekItems(pred).filter(availableNow);
@@ -438,6 +461,7 @@ function rowHTML(it, mode) {
   let due = '';
   if (!date) due = '<span class="sub">Anytime</span>';
   else if (it.overdue) due = `<span class="od">${fmtShort(date)}</span>`;
+  else if (it.early) due = `<span>${fmtDow(date)}</span><span class="sub">early</span>`;
   else if (mode === 'week') due = `<span>${date === ui.today ? 'Today' : fmtDow(date)}</span>${later ? `<span class="sub">from ${opensOn(it) === Rec.addDays(ui.today, 1) ? 'tmrw' : DOW[Rec.weekday(opensOn(it))]}</span>` : t.time ? `<span class="sub">${fmt12(t.time)}</span>` : ''}`;
   else due = t.time ? `<span>${fmt12(t.time)}</span>` : '<span class="sub">Today</span>';
   const streak = streakOf(S.tasks[t.id] || t);
@@ -462,7 +486,7 @@ function tableHTML(items, mode, emptyMsg, view, tid) {
   const shown = showDone ? items : open;
   return `<div class="table">
     <div class="thead"><span>${icon('loader-circle')}Status</span><span>${icon('list-todo')}Task name</span><span>${icon('calendar')}Due</span></div>
-    ${shown.length ? shown.map(it => rowHTML(it, mode)).join('') : `<div class="empty">${fin ? 'All done here' : emptyMsg}</div>`}
+    ${shown.length ? shown.map((it, i) => (it.early && !(shown[i - 1] || {}).early ? `<div class="early-div">${icon('sparkles')}Can get ahead on</div>` : '') + rowHTML(it, mode)).join('') : `<div class="empty">${fin ? 'All done here' : emptyMsg}</div>`}
     ${fin ? `<button class="showdone" data-act="toggle-done" data-tid="${tid}">${icon('check')}${fin} finished · ${showDone ? 'Hide' : 'Show'}</button>` : ''}
     <button class="newrow" data-act="new-task"${catAttr}${mode === 'week' ? ` data-date="${Rec.addDays(ui.today, 1)}"` : mode === 'anytime' ? ' data-undated="1"' : ''}>${icon('plus')}New task</button>
   </div>`;
@@ -643,7 +667,7 @@ function tagsHTML() {
   const vs = views();
   if (!vs.find(v => v.id === ui.view)) ui.view = (vs[0] || {}).id;
   const v = vs.find(x => x.id === ui.view);
-  const chips = `<div class="filters view-chips">${vs.map(x => `<button class="chip${x.id === ui.view ? ' on' : ''}" data-act="view" data-view="${x.id}">${viewIcon(x)}${esc(x.name)}</button>`).join('')}
+  const chips = `<div class="filters view-chips">${vs.map(x => `<button class="chip${x.id === ui.view ? ' on' : ''}" data-act="view" data-view="${x.id}" style="--vc:${slotColor(viewSlot(x))}">${viewIcon(x)}${esc(x.name)}</button>`).join('')}
     <button class="chip" data-act="settings" data-sec="views" aria-label="Edit tags">${icon('pencil')}</button></div>`;
   if (!v) return chips + '<div class="empty">No tag views yet. Add some in Settings.</div>';
   const pred = viewPred(v);
@@ -656,7 +680,7 @@ function tagsHTML() {
       <span class="due"><span class="sub">${nd ? (nd === ui.today ? 'Today' : fmtDow(nd)) : '—'}</span></span></button>`; }).join('');
   const catHint = (v.cats || []).join(', ');
   return `${chips}
-    ${stickyPie([...tI, ...upcomingAll.filter(it => it.date <= Rec.addDays(ui.today, 6) && !isDailyTask(it.t) && availableNow(it))], 'Doable now')}
+    ${stickyPie([...dueToday(tI), ...upcomingAll.filter(it => it.date <= Rec.addDays(ui.today, 6) && !isDailyTask(it.t) && availableNow(it))], 'Doable now')}
     <section class="grid2">
       <div class="block"><h2 class="hblock h1">Today</h2>${tableHTML(tI, 'today', 'Nothing due today', v, 'tag-' + v.id + '-today')}</div>
       <div class="block"><h2 class="hblock h2">Coming up</h2><div class="hint">Next date for each task, up to 2 weeks out</div>${tableHTML(upcoming, 'week', 'Nothing in the next 2 weeks', v, 'tag-' + v.id + '-up')}</div>
@@ -669,7 +693,7 @@ function tagsHTML() {
     <div class="cp-spacer"></div>`;
 }
 
-const WEEK_HINT = 'Today and the next 6 days, except everyday tasks. Faded ones can’t be started yet; the chart counts only what you can do now.';
+const WEEK_HINT = 'Today and the next 6 days, except everyday tasks. What you can do now comes first; faded ones can’t be started yet. Repeating tasks show their next date only.';
 function stickyPie(items, label) {
   return `<section class="chart-sticky">${pieHTML(items, label, true)}</section>`;
 }
@@ -689,7 +713,7 @@ function pageBody() {
   switch (ui.tab) {
     case 'today': {
       const tI = todayItems();
-      return `${stickyPie(tI, "Today's Progress")}
+      return `${stickyPie(dueToday(tI), "Today's Progress")}
         <section class="grid2">
           <div class="block"><h2 class="hblock h1">Today’s To-do</h2>${tableHTML(tI, 'today', 'All clear for today')}</div>
           <div class="block"><h2 class="hblock h3">Yesterday · Today · Tomorrow</h2>${threeDayHTML()}</div>
@@ -713,7 +737,7 @@ function pageBody() {
     case 'lists': return listsHTML();
     default: {
       const tI = todayItems(), wI = weekItems(), und = undatedItems();
-      return `<section class="charts">${pieHTML(tI, "Today's Progress")}${pieHTML(wI.filter(availableNow), "Week · doable now")}</section>
+      return `<section class="charts">${pieHTML(dueToday(tI), "Today's Progress")}${pieHTML(wI.filter(availableNow), "Week · doable now")}</section>
         <section class="grid2">
           <div class="block"><h2 class="hblock h1">Today’s To-do</h2>${tableHTML(tI, 'today', 'All clear for today')}</div>
           <div class="block"><h2 class="hblock h2">This Week’s To-do</h2><div class="hint">${WEEK_HINT}</div>${tableHTML(wI, 'week', 'Nothing this week')}</div>
@@ -846,7 +870,6 @@ function renderEditor() {
       ${h.map(x => `<span class="hdot" title="${fmtShort(x.date)}: ${statusLabel(x.status)}" style="background:var(--st-${x.status})"></span>`).join('')}</div>
       <div class="muted small">${done}/${h.length} of the last ${h.length} done</div></div>`;
   }
-  const hueOrder = (ui.cats || []).map((c, i) => [Palette.rgb2hsl(...c.match(/\w\w/g).map(x => parseInt(x, 16)))[0], i]).sort((a, b) => a[0] - b[0]).map(x => x[1]);
   const pinFull = !t._pin && pinned().filter(id => id !== t.id).length >= 5;
   const defMax = shieldMaxDefault(), defEvery = shieldEveryDefault();
 
@@ -858,7 +881,7 @@ function renderEditor() {
 
   const colorField = `<div class="field"><label>Icon color</label><div class="swatches">
         <button class="sw-auto${t.color === '' || t.color == null ? ' on' : ''}" data-act="ed-color" data-v="">Auto</button>
-        ${hueOrder.map(i => `<button class="swatch${String(t.color) === String(i) ? ' on' : ''}" style="background:var(--cat${i})" data-act="ed-color" data-v="${i}" aria-label="Color ${i + 1}"></button>`).join('')}
+        ${hueOrder().map(i => `<button class="swatch${String(t.color) === String(i) ? ' on' : ''}" style="background:var(--cat${i})" data-act="ed-color" data-v="${i}" aria-label="Color ${i + 1}"></button>`).join('')}
       </div></div>`;
   const notesField = `<div class="field"><label>Notes</label><textarea data-field="notes" rows="2" autocapitalize="sentences">${esc(t.notes || '')}</textarea></div>`;
 
@@ -994,6 +1017,26 @@ function iconSheetGrid() {
   const byId = CATALOG ? Object.fromEntries(CATALOG.map(c => [c.id, c])) : {};
   return PAGE_SUGGEST.map(id => SOLID_CORE[id] ? cell(id, SOLID_CORE[id][0], SOLID_CORE[id][1], SOLID_CORE[id][2]) : byId[id] ? cell(id, byId[id].label, byId[id].vb, byId[id].p) : '').join('');
 }
+// Quick color pick (step 2 after choosing a tag's icon, or from a category's color dot).
+// Each choice previews the icon in that color; "Auto" goes back to the automatic color.
+function openColorSheet(title, iconHTML, cur, autoSlot, onPick, back) {
+  pk = { title, onColor: onPick, back };
+  const cell = (v, sl, label) => `<button class="color-cell${String(cur) === String(v) ? ' on' : ''}" data-act="pk-color" data-v="${v}" aria-label="${label}">
+      <span class="ticon" style="--ic:${slotColor(sl)}">${iconHTML}</span>${v === '' ? '<span class="cc-l">Auto</span>' : ''}</button>`;
+  overlay().className = 'on sheet-mode';
+  overlay().innerHTML = `<div class="scrim" data-act="pk-cancel"></div>
+  <div class="sheet" role="dialog" aria-label="${esc(title)}">
+    <div class="sheet-head"><b>${esc(title)}</b><span class="spacer"></span><button class="iconbtn" data-act="pk-cancel" aria-label="Back">${icon('x')}</button></div>
+    <div class="sheet-body"><div class="muted small">Tasks in this tag use this color for their icons, unless a task has its own color.</div>
+      <div class="color-grid">${cell('', autoSlot, 'Automatic color')}${hueOrder().map(i => cell(i, i, 'Color ' + (i + 1))).join('')}</div>
+      <div class="btnrow"><button class="btn" data-act="pk-cancel">Keep current color</button></div></div></div>`;
+}
+// Store a color for categories (lowercased); '' removes it (automatic).
+function setCatColors(cats, v) {
+  const m = Object.assign({}, metaVal('catColors', {}) || {});
+  cats.forEach(c => { const k = (c || '').trim().toLowerCase(); if (!k) return; if (v === '' || v == null) delete m[k]; else m[k] = +v; });
+  setMeta('catColors', m);
+}
 function refreshIconSheet() { const g = document.getElementById('pk-grid'); if (g) g.innerHTML = iconSheetGrid(); }
 function iconDataFor(id) {
   if (SOLID_CORE[id]) return SOLID_CORE[id][1] + '|' + SOLID_CORE[id][2];
@@ -1066,6 +1109,8 @@ function renameCategory(from, to) {
     .forEach(t => patchTask(t.id, { category: to }, false));
   const vs = views().map(v => Object.assign({}, v, { cats: [...new Set((v.cats || []).map(c => c.toLowerCase() === lf ? to : c).filter(Boolean))] }));
   if (JSON.stringify(vs) !== JSON.stringify(views())) setMeta('views', vs);
+  const cc = metaVal('catColors', {}) || {};
+  if (cc[lf] !== undefined) { const m = Object.assign({}, cc); if (to) m[to.trim().toLowerCase()] = m[lf]; delete m[lf]; setMeta('catColors', m); }
   let list = (metaVal('categories', []) || []).filter(c => c.toLowerCase() !== lf);
   if (to && !list.some(c => c.toLowerCase() === to.toLowerCase())) list.push(to);
   setMeta('categories', list);
@@ -1087,20 +1132,20 @@ function openSettings(section) {
         <span class="muted small">Pick a month to preview or keep its photos and colors.</span></div>
       <div class="field" id="sec-views"><label>Tag views</label>
         <span class="muted small">Each view on the Tags page shows tasks with any of its categories (comma-separated).</span>
-        <span class="muted small">Drag ${solid('fa:grip-vertical', 'inline')} to reorder.</span>
+        <span class="muted small">Drag ${solid('fa:grip-vertical', 'inline')} to reorder. Tap a view’s icon to change its icon and color.</span>
         <div id="view-rows">${views().map((v, i) => `<div class="view-row" data-i="${i}">
           <span class="grip" aria-label="Drag to reorder">${solid('fa:grip-vertical')}</span>
-          <button class="iconpick small" data-act="pick-view-icon" data-i="${i}" aria-label="Icon">${viewIcon(v)}</button>
+          <button class="iconpick small" data-act="pick-view-icon" data-i="${i}" aria-label="Icon and color" style="--ic:${slotColor(viewSlot(v))}">${viewIcon(v)}</button>
           <input data-view-name="${i}" value="${esc(v.name)}" placeholder="Name">
           <input data-view-cats="${i}" value="${esc((v.cats || []).join(', '))}" placeholder="Categories">
           <button class="iconbtn faint" data-act="view-del" data-i="${i}" aria-label="Remove">${icon('x')}</button></div>`).join('')}</div>
         <div class="btnrow"><button class="btn" data-act="view-add">${icon('plus')}Add view</button></div></div>
       <div class="field" id="sec-cats"><label>Categories</label>
-        <span class="muted small">Rename by editing; ${icon('x', 'inline')} removes a category from every task that uses it.</span>
+        <span class="muted small">Tap the dot to change a category’s color. Rename by editing; ${icon('x', 'inline')} removes a category from every task that uses it.</span>
         ${allCategories().map(c => { const n = taskList().filter(t => (t.category || '').toLowerCase() === c.toLowerCase()).length;
-          return `<div class="cat-row"><input data-cat-rename="${esc(c)}" value="${esc(c)}"><span class="muted small">${n} task${n === 1 ? '' : 's'}</span>
+          return `<div class="cat-row"><button class="cat-dot" data-act="cat-color" data-v="${esc(c)}" style="background:${slotColor(catColorSlot(c))}" aria-label="Color for ${esc(c)}"></button><input data-cat-rename="${esc(c)}" value="${esc(c)}"><span class="muted small">${n} task${n === 1 ? '' : 's'}</span>
             <button class="iconbtn faint" data-act="cat-del" data-v="${esc(c)}" aria-label="Delete ${esc(c)}">${icon('x')}</button></div>`; }).join('') || '<div class="muted small">No categories yet.</div>'}
-        <div class="cat-row"><input id="cat-new" placeholder="New category" enterkeyhint="done"><span></span><button class="iconbtn faint" data-act="cat-add" aria-label="Add">${icon('plus')}</button></div></div>
+        <div class="cat-row"><span class="cat-dot ghost"></span><input id="cat-new" placeholder="New category" enterkeyhint="done" autocapitalize="words"><span></span><button class="iconbtn faint" data-act="cat-add" aria-label="Add">${icon('plus')}</button></div></div>
       <div class="field" id="sec-streaks"><label>Streak shields</label>
         <span class="muted small">A shield covers a missed day instead of breaking a streak. These are the defaults; any task can use its own under More options.</span>
         <div class="field inline"><input type="number" id="set-shield-max" class="num" min="0" max="10" value="${shieldMaxDefault()}" inputmode="numeric"><span>shields can be saved up (0 turns them off)</span></div>
@@ -1118,7 +1163,7 @@ function openSettings(section) {
       <div class="btnrow"><button class="btn primary" data-act="st-connect">${config.url ? 'Reconnect' : 'Connect'}</button>
         ${config.url ? `<button class="btn" data-act="st-disconnect">Disconnect</button>` : ''}</div>
       <div id="st-msg" class="muted small">${config.url ? 'Status: ' + esc(ui.sync) + (ui.syncMsg ? ' – ' + esc(ui.syncMsg) : '') : 'Not connected. Tasks are saved on this device only.'}</div>
-      ${link ? `<div class="field"><label>Link for your other device</label><div class="muted small">Open this link once on your phone or laptop to connect it automatically. Keep it private, since it contains your key.</div>
+      ${link ? `<div class="field"><label>Link for your other device</label><div class="muted small">Open this link once on your other phone or laptop to connect it automatically. Keep it private, since it contains your key. On an iPhone the link opens in Safari, not the home-screen app, so paste the URL and key into Settings inside the home-screen app instead.</div>
         <div class="btnrow"><button class="btn" data-act="st-copy" data-link="${esc(link)}">${icon('copy')}Copy link</button>
         <button class="btn" data-act="st-test">${icon('bell-ring')}Send test notification</button></div></div>` : ''}
       <div class="field" id="sec-icons"><label>Month &amp; holiday icons</label><span class="muted small">Tap one to choose a different icon. If the icon updater is set up on GitHub, your home-screen icon follows these too (it checks once a day).</span><div class="icon-tiles">
@@ -1203,13 +1248,31 @@ document.addEventListener('click', e => {
       pk.back = 'icons'; break;
     }
     case 'pick-view-icon': {
-      const i = +d.i;
-      openIconSheet('Icon for ' + (views()[i] || {}).name, id => {
+      // step 1: icon, step 2: color
+      const i = +d.i, name = (views()[i] || {}).name;
+      const colorStep = () => {
+        const v = views()[i]; if (!v) return openSettings('views');
+        const m = metaVal('catColors', {}) || {}, k = ((v.cats || [])[0] || '').trim().toLowerCase();
+        const auto = k ? hashStr(((v.cats || [])[0] || '').toLowerCase()) % 8 : -1;
+        if (!(v.cats || []).length) { toast(`${icon('tag')}Add a category to <b>${esc(v.name)}</b> first, then pick its color`); return openSettings('views'); }
+        openColorSheet('Color for ' + v.name, viewIcon(v), m[k] !== undefined ? m[k] : '', auto, c => { setCatColors(v.cats, c); openSettings('views'); }, 'views');
+      };
+      openIconSheet('Icon for ' + name, id => {
         const vs = views().map(v => Object.assign({}, v));
         if (id) { vs[i].icon = id; vs[i].iconData = SOLID_CORE[id] ? '' : iconDataFor(id); } else { vs[i].icon = 'fa:tags'; vs[i].iconData = ''; }
-        setMeta('views', vs); openSettings('views');
+        setMeta('views', vs); colorStep();
       });
-      pk.back = 'views'; break;
+      pk.back = 'views'; pk.colorStep = colorStep;
+      const bar = document.querySelector('.sheet .btnrow');
+      if (bar) bar.insertAdjacentHTML('beforeend', `<button class="btn" data-act="pk-skip-color">${icon('palette')}Just change the color</button>`);
+      break;
+    }
+    case 'pk-skip-color': if (pk && pk.colorStep) pk.colorStep(); break;
+    case 'pk-color': if (pk && pk.onColor) { const f = pk.onColor; pk = null; f(d.v); } break;
+    case 'cat-color': {
+      const c = d.v, k = c.trim().toLowerCase(), m = metaVal('catColors', {}) || {};
+      openColorSheet('Color for ' + c, solid('fa:tag'), m[k] !== undefined ? m[k] : '', hashStr(c.toLowerCase()) % 8, v => { setCatColors([c], v); openSettings('cats'); }, 'cats');
+      break;
     }
     case 'pk-pick': if (pk) { const f = pk.onPick; pk = null; f(d.icon); } break;
     case 'pk-reset': if (pk) { const f = pk.onPick; pk = null; f(null); } break;

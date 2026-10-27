@@ -295,7 +295,7 @@ input[type=date], input[type=time] { min-height: 40px; }
 .charts.single { grid-template-columns: minmax(0, 1fr); }
 .charts.single .chart-body { flex-direction: row; }
 @media (max-width: 759px) { .charts.single .pie { width: 120px; height: 120px; } .charts.single .chart-body { flex-direction: row; } }
-.view-chips .chip .sic { width: 14px; height: 14px; color: var(--accent); }
+.view-chips .chip .sic { width: 14px; height: 14px; color: var(--vc, var(--accent)); }
 .view-chips { margin-bottom: 14px; }
 .lrow { display: flex; align-items: center; gap: 10px; width: 100%; text-align: left; padding: 8px 2px; border-bottom: 1px solid var(--border); }
 .lrow .ntext { flex: 1; }
@@ -410,7 +410,7 @@ select { font: inherit; color: var(--text); background: var(--surface2); border:
 .grip .sic { width: 14px; height: 14px; }
 .view-row.dragging { opacity: .85; background: var(--surface2); border-radius: 8px; box-shadow: 0 6px 18px rgba(0,0,0,.4); }
 #view-rows { display: grid; gap: 6px; }
-.cat-row { display: grid; grid-template-columns: minmax(0, 1fr) auto 28px; gap: 8px; align-items: center; }
+.cat-row { display: grid; grid-template-columns: 22px minmax(0, 1fr) auto 28px; gap: 8px; align-items: center; }
 
 /* toast */
 #toast { position: fixed; left: 50%; top: calc(58px + env(safe-area-inset-top)); transform: translate(-50%, -20px); opacity: 0; z-index: 60; pointer-events: none;
@@ -480,3 +480,18 @@ select { font: inherit; color: var(--text); background: var(--surface2); border:
 .adv-group > .field { margin: 0; }
 .gd-count { display: inline-flex; align-items: center; gap: 3px; font-size: 12px; width: auto !important; }
 #sec-streaks .field.inline { margin: 6px 0 0; }
+
+/* Today's list: tasks you can get ahead on */
+.early-div { display: flex; align-items: center; gap: 6px; padding: 10px 2px 4px; color: var(--muted); font-size: 12.5px; border-bottom: 1px solid var(--border); }
+.early-div .ic { width: 13px; height: 13px; color: var(--accent); }
+
+/* tag & category colors */
+.iconpick.small { color: var(--ic, var(--accent)); }
+.cat-dot { width: 22px; height: 22px; border-radius: 50%; flex: none; border: 2px solid color-mix(in srgb, var(--text) 25%, transparent); }
+.cat-dot.ghost { border-style: dashed; background: none; }
+.color-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(64px, 1fr)); gap: 10px; margin: 12px 0; }
+.color-cell { display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 8px 4px; border-radius: 12px; border: 2px solid transparent; }
+.color-cell.on { border-color: var(--accent); background: var(--surface2); }
+.color-cell .ticon { width: 46px; height: 46px; border-radius: 12px; }
+.color-cell .ticon .sic { width: 24px; height: 24px; }
+.color-cell .cc-l { font-size: 12px; color: var(--muted); }

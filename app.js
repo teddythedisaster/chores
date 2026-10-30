@@ -271,7 +271,9 @@ const opensOn = it => Rec.addDays(it.date, -earlyDaysOf(it.t));
 // can it be worked on today? (due today or earlier, or inside its "can start early" window)
 const availableNow = it => !it.date || opensOn(it) <= ui.today;
 
-function todayItems(pred = passesFilter) {
+// early: also list tasks from later in the week that can already be started ("Can get ahead on").
+// Only the phone's Today tab uses it; pages that show This Week's To-do right beside it don't.
+function todayItems(pred = passesFilter, early = true) {
   const today = ui.today, out = instancesOn(today, pred);
   taskList().forEach(t => {
     if (!pred(t) || out.some(it => it.t.id === t.id)) return;
@@ -280,7 +282,7 @@ function todayItems(pred = passesFilter) {
     if (it.date < today && !FINISHED[stOf(it)]) out.push(it);
   });
   // then anything from the week that can already be started, at the bottom ("early")
-  weekItems(pred).forEach(it => {
+  if (early) weekItems(pred).forEach(it => {
     if (it.date > today && availableNow(it) && !out.some(o => o.t.id === it.t.id)) out.push(Object.assign({}, it, { early: true }));
   });
   const rank = it => FINISHED[stOf(it)] ? 3 : it.overdue ? 0 : it.early ? 2 : 1;
@@ -288,23 +290,32 @@ function todayItems(pred = passesFilter) {
 }
 // Today's chart counts only what's due today (or overdue), not tasks done early.
 const dueToday = items => items.filter(it => !it.early);
-// The week: every task that isn't an every-day one, due today through the next 6 days.
-// A repeating task shows only one occurrence: today's if it has one (even if already
-// done, so the week's progress includes it), otherwise the next one not finished yet.
+// Coming up this week: tomorrow through the next 6 days, without everyday tasks and
+// without tasks already due today (so nothing is listed twice). A repeating task shows
+// once: its next date that isn't finished yet.
 // Order: what can be done now (by date), then what's coming up (by date).
-function weekItems(pred = passesFilter) {
-  const all = [];
-  for (let k = 0; k < 7; k++) all.push(...instancesOn(Rec.addDays(ui.today, k), t => pred(t) && !isDailyTask(t)));
-  all.sort((a, b) => a.date.localeCompare(b.date) || byTime(a, b));
-  const next = new Map();
-  all.forEach(it => {
-    const cur = next.get(it.t.id);
-    if (!cur || (cur.date !== ui.today && FINISHED[stOf(cur)] && !FINISHED[stOf(it)])) next.set(it.t.id, it);
-  });
-  return [...next.values()].sort((a, b) => availableNow(b) - availableNow(a) || a.date.localeCompare(b.date) || byTime(a, b));
+// Plans (tasks in the Plans tag) are the exception: every date they fall on shows.
+function isPlan(t) {
+  const c = (t.category || '').trim().toLowerCase(); if (!c) return false;
+  if (c === 'plans' || c === 'plan') return true;
+  const v = views().find(x => x.id === 'plans' || (x.name || '').trim().toLowerCase() === 'plans');
+  return !!(v && (v.cats || []).some(x => x.trim().toLowerCase() === c));
 }
-// The week chart only counts what can be done now.
-const weekNowItems = (pred = passesFilter) => weekItems(pred).filter(availableNow);
+function weekItems(pred = passesFilter) {
+  const dueNow = new Set(todayItems(pred, false).map(it => it.t.id)), all = [];
+  for (let k = 1; k < 7; k++) all.push(...instancesOn(Rec.addDays(ui.today, k), t => pred(t) && (isPlan(t) || (!isDailyTask(t) && !dueNow.has(t.id)))));
+  all.sort((a, b) => a.date.localeCompare(b.date) || byTime(a, b));
+  const next = new Map(), plans = [];
+  all.forEach(it => {
+    if (isPlan(it.t)) { plans.push(it); return; }
+    const cur = next.get(it.t.id); if (!cur || (FINISHED[stOf(cur)] && !FINISHED[stOf(it)])) next.set(it.t.id, it);
+  });
+  return [...next.values(), ...plans].sort((a, b) => availableNow(b) - availableNow(a) || a.date.localeCompare(b.date) || byTime(a, b));
+}
+// The phone's Week tab: everything due today (dailies and overdue included), then the rest of the week.
+const weekTabItems = (pred = passesFilter) => [...todayItems(pred, false), ...weekItems(pred)];
+// The week chart, everywhere: today's tasks plus later ones that can already be started.
+const weekChartItems = (pred = passesFilter) => [...dueToday(todayItems(pred, false)), ...weekItems(pred).filter(availableNow)];
 function upcomingItems(pred, days) {
   const out = [];
   for (let k = 1; k <= days; k++) out.push(...instancesOn(Rec.addDays(ui.today, k), pred));
@@ -737,18 +748,18 @@ function lapCalendarHTML() {
     <div class="lcal-g">${cols}</div></div>`;
 }
 function lapHomeHTML() {
-  const tI = todayItems(), wI = weekItems(), und = undatedItems();
+  const tI = todayItems(passesFilter, false), wI = weekItems(), und = undatedItems();
   const lists = [...metaVal('lists', []), NOTES_LIST], shown = homeLists().map(id => lists.find(l => l.id === id)).filter(Boolean);
   return `${tagBar()}
     <section class="lh-r1">
-      <div class="lh-left">${lapChartHTML(dueToday(tI), wI.filter(availableNow))}</div>
+      <div class="lh-left">${lapChartHTML(dueToday(tI), weekChartItems())}</div>
       <div class="lh-right">
         <div class="block lap-any"><h2 class="hblock h4">Anytime</h2>${tableHTML(und, 'anytime', 'No undated tasks. Make one with <b>No date</b> in a new task.', null, 'lap-any')}</div>
         ${shown.map((l, k) => listCardHTML(l, k, 'block')).join('') || `<div class="block muted small">Pick lists to show here with the ${solid('fa:house', 'inline')} button on the Lists tab.</div>`}
       </div></section>
     <section class="lh-r2">
       <div class="block"><h2 class="hblock h1">Today’s To-do</h2>${tableHTML(tI, 'today', 'All clear for today')}</div>
-      <div class="block"><h2 class="hblock h2">This Week’s To-do</h2><div class="hint">${WEEK_HINT}</div>${tableHTML(wI, 'week', 'Nothing this week')}</div>
+      <div class="block"><h2 class="hblock h2">This Week’s To-do</h2><div class="hint">${WEEK_HINT}</div>${tableHTML(wI, 'week', 'Nothing else this week')}</div>
     </section>
     <section class="block lh-cal"><h2 class="hblock h3">This Week</h2>${lapCalendarHTML()}</section>
     <section class="block lh-streaks"><h2 class="hblock h4">Pinned streaks</h2>${streaksHTML(() => true, pinned())}</section>`;
@@ -788,7 +799,8 @@ function nextDue(t) {
 }
 
 
-const WEEK_HINT = 'Today and the next 6 days, except everyday tasks. What you can do now comes first; faded ones can’t be started yet. Repeating tasks show their next date only.';
+const WEEK_HINT = 'The next 6 days, without everyday tasks or anything already in Today’s To-do. What you can start now comes first; faded ones can’t be started yet.';
+const WEEK_TAB_HINT = 'Everything due today, then the next 6 days (everyday tasks only today). What you can start now comes first; faded ones can’t be started yet.';
 // Tag chips: filter the page's lists, charts and calendar to one tag view.
 function tagBar() {
   const vs = views(), cur = activeTag();
@@ -833,23 +845,23 @@ function pageBody() {
         <div class="cp-spacer"></div>`;
     }
     case 'week': {
-      const wI = weekItems();
+      const wI = weekTabItems();
       return `${tagBar()}<div class="split">
-        <aside class="split-side">${stickyPie(wI.filter(availableNow), withTag("Doable now"))}</aside>
+        <aside class="split-side">${stickyPie(weekChartItems(), "This week · doable now")}</aside>
         <div class="split-main">
         <section class="grid2">
-          <div class="block"><h2 class="hblock h2">This Week’s To-do</h2><div class="hint">${WEEK_HINT}</div>${tableHTML(wI, 'week', 'Nothing this week')}</div>
+          <div class="block"><h2 class="hblock h2">This Week’s To-do</h2><div class="hint">${WEEK_TAB_HINT}</div>${tableHTML(wI, 'week', 'Nothing this week')}</div>
           <div class="block"><h2 class="hblock h3">Calendar</h2>${calendarHTML()}</div>
         </section></div></div>
         <div class="cp-spacer"></div>`;
     }
     case 'lists': return listsHTML();
     default: {
-      const tI = todayItems(), wI = weekItems(), und = undatedItems();
+      const tI = todayItems(passesFilter, false), wI = weekItems(), und = undatedItems();
       return `${tagBar()}<div class="ov">
-        <section class="charts ov-charts">${pieHTML(dueToday(tI), withTag("Today's Progress"))}${pieHTML(wI.filter(availableNow), withTag("Week · doable now"))}</section>
+        <section class="charts ov-charts">${pieHTML(dueToday(tI), withTag("Today's Progress"))}${pieHTML(weekChartItems(), withTag("Week · doable now"))}</section>
         <div class="block ov-today"><h2 class="hblock h1">Today’s To-do</h2>${tableHTML(tI, 'today', 'All clear for today')}</div>
-        <div class="block ov-week"><h2 class="hblock h2">This Week’s To-do</h2><div class="hint">${WEEK_HINT}</div>${tableHTML(wI, 'week', 'Nothing this week')}</div>
+        <div class="block ov-week"><h2 class="hblock h2">This Week’s To-do</h2><div class="hint">${WEEK_HINT}</div>${tableHTML(wI, 'week', 'Nothing else this week')}</div>
         <div class="block ov-any"><h2 class="hblock h4">Anytime</h2><div class="hint">Tasks with no date</div>${tableHTML(und, 'anytime', 'No undated tasks. Make one with <b>No date</b> in a new task.', null, 'ov-any')}</div>
         <div class="block ov-streaks"><h2 class="hblock h3">Pinned streaks</h2>${streaksHTML(() => true, pinned())}</div>
         ${wide ? `<div class="block ov-lists">${listsHTML(true)}</div>` : ''}
@@ -865,6 +877,7 @@ function render() {
   const y = window.scrollY;
   const layout = photoLayout(banner);
   document.body.classList.toggle('photo-bg', layout === 'background');
+  document.body.classList.toggle('no-hints', !metaVal('hints', true));
   let bg = document.getElementById('bgphoto');
   if (layout === 'background') {
     if (!bg) { bg = document.createElement('div'); bg.id = 'bgphoto'; bg.setAttribute('aria-hidden', 'true'); bg.innerHTML = '<img alt="" onerror="driveFallback(this)">'; document.body.prepend(bg); }
@@ -1291,6 +1304,8 @@ function settingsPageHTML(page) {
         <span class="muted small">Pick a month to preview or keep its photos and colors.</span></div>
       ${menuRow('photos', 'Photos', 'Layout, take photos out of the rotation, add your own', 'fa:image')}
       ${menuRow('icons', 'Month & holiday icons', 'Pick the icon for each month and holiday', 'fa:ghost')}
+      <label class="toggle"><input type="checkbox" id="set-hints" ${metaVal('hints', true) ? 'checked' : ''}><span class="sw"></span>
+        <span><b>Section descriptions</b><span class="muted small">The short gray notes under section titles, like the one under This Week’s To-do</span></span></label>
       <label class="toggle"><input type="checkbox" id="set-holidays" ${metaVal('holidays', true) ? 'checked' : ''}><span class="sw"></span>
         <span><b>Holidays</b><span class="muted small">Holiday photos, icons and particles on their dates</span></span></label>
       <label class="toggle"><input type="checkbox" id="set-motion" ${LS.get('motion', true) ? 'checked' : ''}><span class="sw"></span>
@@ -1663,6 +1678,7 @@ document.addEventListener('change', e => {
   if (t.id === 'photo-set') { ui.photoSet = t.value; openSettings('photos'); }
   if (t.id === 'photo-upload' && t.files && t.files.length) uploadPhotos([...t.files], ui.photoSet || (activeTheme().holiday || MONTHS[activeTheme().monthIdx].key));
   if (t.id === 'set-holidays') setMeta('holidays', t.checked);
+  if (t.id === 'set-hints') setMeta('hints', t.checked);
   if (t.id === 'set-shield-max') { const v = intOr(t.value, 3, 0, 10); t.value = v; setMeta('shieldMax', v); }
   if (t.id === 'set-shield-every') { const v = intOr(t.value, 6, 1, 99); t.value = v; setMeta('shieldEvery', v); }
   if (t.id === 'set-theme') setMeta('theme', t.value);

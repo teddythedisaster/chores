@@ -10,9 +10,10 @@ const LS = {
 let S = LS.get('state', null) || { tasks: {}, statuses: {}, items: {}, meta: {} };
 let outbox = LS.get('outbox', []);
 let config = LS.get('config', { url: '', key: '' });
-const ui = { filter: 'All', tab: LS.get('tab', 'overview'), view: LS.get('view', null), lastTab: null, calWeek: null, cats: [], calDay: null, listId: null, sync: 'local', syncMsg: '', today: todayStr() };
+const ui = { tab: LS.get('tab', 'overview') === 'tags' ? 'overview' : LS.get('tab', 'overview'), tag: LS.get('tagFilter', null), ltab: LS.get('ltab', 'home'), lastTab: null, calWeek: null, cats: [], calDay: null, listId: null, sync: 'local', syncMsg: '', today: todayStr() };
 
-const FINISHED = { done: 1, not_needed: 1 };
+// Closed statuses: drop out of the to-do lists. Missed = a repeat that wasn't done in time.
+const FINISHED = { done: 1, not_needed: 1, missed: 1 };
 // Extra search words for the icon picker (query word -> also search these).
 const SYN = {
   meds: 'pill pills medication medicine prescription capsules', medicine: 'pill pills medication prescription', pill: 'pills medication capsules',
@@ -86,7 +87,9 @@ const iconColor = t => slotColor(catSlot(t));
 // the 8 theme colors in rainbow order (they change with each photo, so sort by hue)
 const hueOrder = () => (ui.cats || []).map((c, i) => [Palette.rgb2hsl(...c.match(/\w\w/g).map(x => parseInt(x, 16)))[0], i]).sort((a, b) => a[0] - b[0]).map(x => x[1]);
 function taskList() { return Object.values(S.tasks).filter(t => !t.deleted); }
-function passesFilter(t) { return ui.filter === 'All' || (t.category || '') === ui.filter; }
+// Tag filter (the chips at the top of Overview, Today and Week; this device only).
+const activeTag = () => ui.tag ? views().find(v => v.id === ui.tag) || null : null;
+function passesFilter(t) { const v = activeTag(); return !v || viewPred(v)(t); }
 
 /* ================= mutations (optimistic + queued) ================= */
 // Every change carries the list of fields it touches, so the server can merge field by
@@ -132,7 +135,7 @@ const setMeta = (key, value) => commit({ t: 'meta', key, value, updatedAt: Date.
 
 /* ================= sync with Apps Script ================= */
 let flushTimer = null, inflight = false, retryMs = 4000;
-const BACKEND_VERSION = 6; // matches VERSION in Code.gs
+const BACKEND_VERSION = 8; // matches VERSION in Code.gs
 function scheduleFlush(ms = 350) { clearTimeout(flushTimer); flushTimer = setTimeout(flush, ms); }
 function setSync(s, msg = '') { ui.sync = s; ui.syncMsg = msg; const el = document.getElementById('sync'); if (el) el.outerHTML = syncBadge(); }
 
@@ -184,6 +187,7 @@ function loadServerState(st) {
   if (!next.meta.lists) next.meta.lists = { value: [{ id: 'shopping', name: 'Shopping' }], updatedAt: 0 };
   const wasOld = ui.backendOld;
   ui.backendOld = (st.version || 0) < BACKEND_VERSION;
+  ui.reminders = st.reminders || null;
   const before = fingerprint(S);
   S = next; OV = null;
   outbox.forEach(applyOp); // keep anything not yet confirmed
@@ -208,7 +212,7 @@ let lastTouch = 0, idleTimer = 0;
 ['pointerdown', 'touchstart', 'keydown'].forEach(ev => document.addEventListener(ev, () => { lastTouch = Date.now(); }, { capture: true, passive: true }));
 function renderWhenIdle() {
   clearTimeout(idleTimer);
-  const busy = Date.now() - lastTouch < 1500 || isw || drag ||
+  const busy = Date.now() - lastTouch < 1500 || isw || drag || ld ||
     document.querySelector('#overlay.menu-mode, .sheet input:focus, .sheet textarea:focus, .items input:focus, .items textarea:focus');
   if (busy) { idleTimer = setTimeout(renderWhenIdle, 700); return; }
   render();
@@ -246,8 +250,19 @@ function instancesOn(ds, pred = () => true) {
   (ovIndex().to[ds] || []).forEach(([id, key]) => { const t = S.tasks[id]; if (t && !t.deleted && pred(t) && Rec.occursOn(t, key)) out.push(inst(t, key)); });
   return out;
 }
-const byTime = (a, b) => (a.t.time || '99').localeCompare(b.t.time || '99') || a.t.name.localeCompare(b.t.name);
-const stOf = it => statusOf(it.t.id, it.key);
+// Timed tasks by time; untimed ones in your own order (long-press and drag), then by name.
+const rankOf = t => (t.rank === '' || t.rank == null || isNaN(+t.rank)) ? 1e9 : +t.rank;
+const byTime = (a, b) => (a.t.time || '99').localeCompare(b.t.time || '99') || (!a.t.time && !b.t.time ? rankOf(a.t) - rankOf(b.t) : 0) || a.t.name.localeCompare(b.t.name);
+// Status as shown: a repeating task's unfinished occurrence counts as Missed once its
+// next occurrence can be started. Changing it later (e.g. to Done) overrides this.
+function effStatus(t, key) {
+  const st = statusOf(t.id, key);
+  if (FINISHED[st] || !t.repeat || t.repeat === 'none' || !key || key === ANYTIME || key >= ui.today) return st;
+  const nx = nextAfter(t, key);
+  return nx && Rec.addDays(nx, -earlyDaysOf(t)) <= ui.today ? 'missed' : st;
+}
+function nextAfter(t, ds) { for (let k = 1; k <= 400; k++) { const d = Rec.addDays(ds, k); if (Rec.occursOn(t, d)) return d; } return null; }
+const stOf = it => effStatus(S.tasks[it.t.id] || it.t, it.key);
 const isDailyTask = t => t.repeat === 'daily' && (+t.interval || 1) === 1;
 const isUndated = t => !t.start && (t.repeat || 'none') === 'none';
 // how many days before its due date a task can be started (older tasks: "early" = up to a week)
@@ -274,14 +289,18 @@ function todayItems(pred = passesFilter) {
 // Today's chart counts only what's due today (or overdue), not tasks done early.
 const dueToday = items => items.filter(it => !it.early);
 // The week: every task that isn't an every-day one, due today through the next 6 days.
-// A repeating task shows only its next occurrence (the first one not finished yet).
+// A repeating task shows only one occurrence: today's if it has one (even if already
+// done, so the week's progress includes it), otherwise the next one not finished yet.
 // Order: what can be done now (by date), then what's coming up (by date).
 function weekItems(pred = passesFilter) {
   const all = [];
   for (let k = 0; k < 7; k++) all.push(...instancesOn(Rec.addDays(ui.today, k), t => pred(t) && !isDailyTask(t)));
   all.sort((a, b) => a.date.localeCompare(b.date) || byTime(a, b));
   const next = new Map();
-  all.forEach(it => { const cur = next.get(it.t.id); if (!cur || (FINISHED[stOf(cur)] && !FINISHED[stOf(it)])) next.set(it.t.id, it); });
+  all.forEach(it => {
+    const cur = next.get(it.t.id);
+    if (!cur || (cur.date !== ui.today && FINISHED[stOf(cur)] && !FINISHED[stOf(it)])) next.set(it.t.id, it);
+  });
   return [...next.values()].sort((a, b) => availableNow(b) - availableNow(a) || a.date.localeCompare(b.date) || byTime(a, b));
 }
 // The week chart only counts what can be done now.
@@ -313,11 +332,11 @@ function streakInfo(t) {
   for (let n = Rec.dayNum(t.start > from ? t.start : from), end = Rec.dayNum(ui.today); n <= end; n++) {
     const ds = Rec.fromNum(n);
     if (!Rec.occursOn(t, ds)) continue;
-    const st = statusOf(t.id, ds);
+    const st = effStatus(t, ds);
     let kind;
     if (st === 'done') { cur++; since++; kind = 'done'; if (since >= every) { since = 0; if (graces < max) { graces++; kind = 'earn'; } } }
     else if (st === 'not_needed') kind = 'pause';
-    else if (ds === ui.today) kind = 'today';
+    else if (ds === ui.today && st !== 'missed') kind = 'today';
     else if (st === 'p25' || st === 'p50' || st === 'p75') kind = 'partial';
     else if (graces > 0) { graces--; kind = 'grace'; }
     else { cur = 0; since = 0; kind = 'miss'; }
@@ -364,7 +383,7 @@ function streaksHTML(pred = () => true, onlyIds = null) {
 function historyOf(t, count = 14) {
   const out = [];
   let d = Rec.occursOn(t, ui.today) ? ui.today : Rec.prevOccurrence(t, ui.today);
-  while (d && out.length < count) { out.unshift({ date: d, status: statusOf(t.id, d) }); d = Rec.prevOccurrence(t, d); }
+  while (d && out.length < count) { out.unshift({ date: d, status: effStatus(t, d) }); d = Rec.prevOccurrence(t, d); }
   return out;
 }
 
@@ -372,6 +391,8 @@ function historyOf(t, count = 14) {
 const PAL = {}; // banner url -> color clusters
 // Theme follows the date (month, plus holidays), or a month pinned in Settings.
 function activeTheme() {
+  HIDDEN_PHOTOS = metaVal('hiddenPhotos', []) || [];
+  CUSTOM_PHOTOS = metaVal('customPhotos', {}) || {};
   const pref = metaVal('theme', 'auto');
   const mi = MONTH_KEYS.indexOf(pref);
   const tdate = mi >= 0 ? ui.today.slice(0, 5) + Rec.pad(mi + 1) + '-15' : ui.today;
@@ -409,7 +430,7 @@ function themeTokens() {
 // 'background' = photo fills the whole screen behind frosted panels; 'banner' = strip at the top.
 function photoLayout(banner) {
   if (!banner) return 'banner';
-  const pref = metaVal('photoLayout', 'auto');
+  const pref = photoLayoutPref();
   if (pref !== 'auto') return pref;
   if (banner.layout) return banner.layout;
   const info = banner.w ? banner : PAL[banner.url];
@@ -468,7 +489,8 @@ function rowHTML(it, mode) {
   const meta = [t.repeat && t.repeat !== 'none' ? `<span class="rep" title="Repeats">${icon('repeat')}</span>` : '',
     t._ov ? `<span class="rep" title="Changed for this day only">${icon('pencil')}</span>` : '',
     t.streak && streak >= 1 ? `<span class="streak">${icon('flame')}${streak}</span>` : ''].join('');
-  return `<div class="row${fin ? ' fin' : ''}${it.overdue ? ' overdue' : ''}${later ? ' later' : ''}">
+  const grp = date && !t.time ? ` data-group="${mode}|${date}|${later ? 1 : 0}" data-task="${t.id}"` : '';
+  return `<div class="row${fin ? ' fin' : ''}${st === 'missed' ? ' missed' : ''}${it.overdue ? ' overdue' : ''}${later ? ' later' : ''}"${grp}>
     ${pill(st, `data-act="status" data-task="${t.id}" data-date="${key}"`)}
     <button class="name" data-act="edit-task" data-task="${t.id}" data-key="${key}">
       <span class="ticon" style="--ic:${iconColor(t)}">${taskIcon(t)}</span>
@@ -542,7 +564,7 @@ function calendarHTML() {
     let shown = items, dailyHidden = 0;
     if (items.length > MAX) { shown = items.filter(it => !isDaily(it.t)); dailyHidden = items.length - shown.length; }
     shown = shown.slice().sort((a, b) => isDaily(a.t) - isDaily(b.t));
-    const icons = shown.map(it => `<span class="mini${FINISHED[stOf(it)] ? ' fin' : ''}" style="color:${iconColor(it.t)}" title="${esc(it.t.name)}">${taskIcon(it.t)}</span>`).join('');
+    const icons = shown.map(it => `<span class="mini${FINISHED[stOf(it)] ? ' fin' : ''}${stOf(it) === 'missed' ? ' missed' : ''}" style="color:${iconColor(it.t)}" title="${esc(it.t.name)}">${taskIcon(it.t)}</span>`).join('');
     const more = dailyHidden ? `<span class="more">+${dailyHidden} daily</span>` : '';
     cells += `<button class="wk-cell${ds === ui.today ? ' today' : ''}${ds === ui.calDay ? ' sel' : ''}${ds < ui.today ? ' past' : ''}" data-act="cal-day" data-date="${ds}">
       <span class="dow">${DOW[i]}</span><span class="num">${+ds.slice(8)}</span><span class="wk-icons">${icons}${more}</span></button>`;
@@ -562,7 +584,7 @@ function calendarHTML() {
 
 // One checklist row. Swipe it left to reveal the delete button (on a computer, hover shows it).
 function itemRowHTML(i, extra = '') {
-  return `<div class="item swipe${i.checked ? ' checked' : ''}" data-row="${i.id}">
+  return `<div class="item swipe${i.checked ? ' checked' : ''}" data-row="${i.id}" data-group="list|${i.listId}|${i.checked ? 1 : 0}">
     <div class="item-inner">
       <button class="cb" data-act="item-toggle" data-item="${i.id}" aria-label="Toggle">${icon(i.checked ? 'square-check-big' : 'square')}</button>
       <textarea rows="1" data-item-edit="${i.id}" aria-label="Item" enterkeyhint="done" autocapitalize="sentences">${esc(i.text)}</textarea>
@@ -570,6 +592,28 @@ function itemRowHTML(i, extra = '') {
     </div>
     <button class="item-x" data-act="item-del" data-item="${i.id}" aria-label="Delete" tabindex="-1">${icon('x')}</button></div>`;
 }
+const LIST_HEADS = ['h1', 'h2', 'h3', 'h4'];
+// One checklist with its title, items and "Add item". opts.pin shows the laptop's "On Home" toggle.
+function listCardHTML(l, k, cls = 'block', opts = {}) {
+  const items = Object.values(S.items).filter(i => i.listId === l.id).sort((a, b) => (a.checked - b.checked) || (a.sort - b.sort));
+  // long lists tuck checked items away (tap to show them)
+  const nChecked = items.filter(i => i.checked).length, long = items.length > 8;
+  const showChecked = !long || !!(ui.showChecked || {})[l.id];
+  const extra = i => l.id === '__notes' ? `<button class="iconbtn faint" data-act="note-to-task" data-item="${i.id}" title="Make it a task" aria-label="Make it a task">${icon('calendar-plus')}</button>` : '';
+  const rows = items.filter(i => showChecked || !i.checked).map(i => itemRowHTML(i, extra(i))).join('');
+  const left = items.filter(i => !i.checked).length, onHome = homeLists().includes(l.id);
+  return `<div class="${cls}"><h2 class="hblock ${LIST_HEADS[k % 4]} list-head">${esc(l.name)}<span class="lh-count">${left}</span>
+      ${opts.pin ? `<button class="pin-home${onHome ? ' on' : ''}" data-act="list-home" data-list="${l.id}" title="${onHome ? 'Shown on Home' : 'Show on Home'}">${solid('fa:house', 'inline')}${onHome ? 'On Home' : ''}</button>` : ''}
+      ${l.id === '__notes' ? '' : `<button class="iconbtn" data-act="list-menu" data-list="${l.id}" aria-label="Rename or delete ${esc(l.name)}">${icon('ellipsis')}</button>`}</h2>
+    <div class="items">${rows}
+      <div class="item new"><span class="cb">${icon('plus')}</span><textarea rows="1" class="new-item" data-list="${l.id}" placeholder="${l.id === '__notes' ? 'Jot down a quick task…' : 'Add item'}" enterkeyhint="done" autocapitalize="sentences"></textarea></div></div>
+    ${long && nChecked ? `<button class="showdone" data-act="toggle-checked" data-list="${l.id}">${icon('check')}${nChecked} checked · ${showChecked ? 'Hide' : 'Show'}</button>` : ''}
+    ${items.some(i => i.checked) ? `<button class="chip small" data-act="items-clear" data-list="${l.id}">${icon('eraser')}Clear checked</button>` : ''}</div>`;
+}
+// Lists shown beside the chart on the laptop's Home (synced; the phone ignores it).
+const NOTES_LIST = { id: '__notes', name: 'Today’s Notes' };
+const homeLists = () => { const v = metaVal('homeLists', null); if (Array.isArray(v)) return v; const l = metaVal('lists', []); return l.length ? [l[0].id] : []; };
+
 // Lists: chips at the top show/hide each list (this device only); every visible list
 // gets its own titled section on the page.
 function listsHTML(inBlock = false, intro = '') {
@@ -579,22 +623,7 @@ function listsHTML(inBlock = false, intro = '') {
   const chips = `<div class="filters list-chips">${lists.map(l => { const on = !hidden.includes(l.id);
       return `<button class="chip${on ? ' on' : ''}" data-act="list-toggle" data-list="${l.id}" aria-pressed="${on}">${esc(l.name)}</button>`; }).join('')}
     <button class="chip add-list" data-act="list-add" aria-label="New list" title="New list">${icon('plus')}</button></div>`;
-  const heads = ['h1', 'h2', 'h3', 'h4'];
-  const sections = lists.map((l, k) => {
-    if (hidden.includes(l.id)) return '';
-    const items = Object.values(S.items).filter(i => i.listId === l.id).sort((a, b) => (a.checked - b.checked) || (a.sort - b.sort));
-    // long lists tuck checked items away (tap to show them)
-    const nChecked = items.filter(i => i.checked).length, long = items.length > 8;
-    const showChecked = !long || !!(ui.showChecked || {})[l.id];
-    const rows = items.filter(i => showChecked || !i.checked).map(i => itemRowHTML(i)).join('');
-    const left = items.filter(i => !i.checked).length;
-    return `<div class="${inBlock ? 'list-sec' : 'block'}"><h2 class="hblock ${heads[k % 4]} list-head">${esc(l.name)}<span class="lh-count">${left}</span>
-        <button class="iconbtn" data-act="list-menu" data-list="${l.id}" aria-label="Rename or delete ${esc(l.name)}">${icon('ellipsis')}</button></h2>
-      <div class="items">${rows}
-        <div class="item new"><span class="cb">${icon('plus')}</span><textarea rows="1" class="new-item" data-list="${l.id}" placeholder="Add item" enterkeyhint="done" autocapitalize="sentences"></textarea></div></div>
-      ${long && nChecked ? `<button class="showdone" data-act="toggle-checked" data-list="${l.id}">${icon('check')}${nChecked} checked · ${showChecked ? 'Hide' : 'Show'}</button>` : ''}
-      ${items.some(i => i.checked) ? `<button class="chip small" data-act="items-clear" data-list="${l.id}">${icon('eraser')}Clear checked</button>` : ''}</div>`;
-  }).join('');
+  const sections = lists.map((l, k) => hidden.includes(l.id) ? '' : listCardHTML(l, k, inBlock ? 'list-sec' : 'block')).join('');
   const allHidden = lists.every(l => hidden.includes(l.id));
   return `${inBlock ? chips : `<div class="block lists-top">${intro}${chips}</div>`}${allHidden ? '<div class="empty">All lists are hidden. Tap a list above to show it.</div>' : `<div class="${inBlock ? '' : 'grid2 lists-grid'}">${sections}</div>`}`;
 }
@@ -604,7 +633,6 @@ const TABS = [
   { id: 'overview', label: 'Overview', icon: 'fa:house' },
   { id: 'today', label: 'Today', icon: 'fa:calendar-day' },
   { id: 'week', label: 'Week', icon: 'fa:calendar-week' },
-  { id: 'tags', label: 'Tags', icon: 'fa:tags' },
   { id: 'lists', label: 'Lists', icon: 'fa:list-check' }
 ];
 const DEFAULT_VIEWS = [
@@ -615,6 +643,9 @@ const DEFAULT_VIEWS = [
 ];
 const views = () => metaVal('views', DEFAULT_VIEWS) || DEFAULT_VIEWS;
 const isWide = () => innerWidth >= 760;
+// Laptop layout (Notion-style Home + Lists) for windows at least this wide; phones keep their tabs.
+const LAP_MIN = 700;
+const isLap = () => innerWidth >= LAP_MIN;
 function viewIcon(v, cls = '') {
   if (v.iconData) { const k = v.iconData.indexOf('|'); return svgPath(v.iconData.slice(0, k), v.iconData.slice(k + 1), cls); }
   return solid(v.icon || 'fa:tags', cls);
@@ -634,6 +665,99 @@ function comboListHTML(q) {
     (!hits.length && !q ? '<div class="muted small">No categories yet. Type one to create it.</div>' : '');
 }
 const viewPred = v => t => (v.cats || []).some(c => c.trim().toLowerCase() === (t.category || '').trim().toLowerCase());
+
+/* ================= laptop layout ================= */
+function renderLap({ top, title, banner, y }) {
+  const tab = ui.ltab === 'lists' ? 'lists' : 'home', tag = activeTag();
+  const heading = tab === 'lists' ? 'Lists' : esc(title) + (tag ? ` <span class="tagt">• ${esc(tag.name)}</span>` : '');
+  document.getElementById('app').innerHTML = `
+  <header class="topbar">
+    <span class="crumb">${pageIconHTML('accent')}<span>${esc(title)}</span></span>
+    <nav class="lnav" aria-label="Pages">${[['home', 'Home', 'fa:house'], ['lists', 'Lists', 'fa:list-check']].map(([id, l, ic]) =>
+      `<button class="${tab === id ? 'on' : ''}" data-act="ltab" data-tab="${id}">${solid(ic)}<span>${l}</span></button>`).join('')}</nav>
+    <span class="spacer"></span>
+    ${tab === 'lists' ? `<button class="btn" data-act="list-add">${icon('list-plus')}New list</button>` : `<button class="btn primary" data-act="new-task">${icon('plus')}New task</button>`}
+    ${syncBadge()}
+    <button class="iconbtn" data-act="settings" aria-label="Settings">${icon('settings')}</button>
+  </header>
+  ${top}
+  ${config.url && ui.backendOld ? `<div class="warnbar">${icon('cloud-off')}<span><b>Your Google Sheet script is out of date</b>, so some changes won’t save. In Apps Script, paste in the new Code.gs, then Deploy → Manage deployments → pencil → Version: New version → Deploy.</span></div>` : ''}
+  <main class="page lpage ltab-${tab}">
+    <div class="hero"><div class="page-icon">${pageIconHTML()}</div><h1 class="title">${heading}</h1><div class="subtitle">${fmtLong(ui.today)}</div></div>
+    ${tab === 'lists' ? lapListsHTML() : lapHomeHTML()}
+    ${banner && banner.credit ? `<div class="credit">Photo: ${esc(banner.credit)} on Unsplash</div>` : ''}
+  </main>`;
+  fitTextareas();
+  fitLapChart();
+  const key = 'lap-' + tab;
+  if (ui.lastTab !== key) { ui.lastTab = key; window.scrollTo(0, 0); } else window.scrollTo(0, y);
+}
+// Progress chart: two large rings when the column beside it is tall, bars when it's short.
+function lapChartHTML(tI, wI) {
+  const parts = items => { const c = {}; STATUSES.forEach(s => c[s.id] = 0); items.forEach(it => c[stOf(it)]++); return c; };
+  const ORDER = ['done', 'not_needed', 'p75', 'p50', 'p25', 'not_started', 'missed'];
+  const one = (label, items, size) => {
+    const c = parts(items), total = items.length, done = c.done + c.not_needed;
+    const R = 44, C = 2 * Math.PI * R; let off = 0, arcs = '';
+    if (total) ORDER.forEach(id => { const n = c[id]; if (!n) return; const L = n / total * C;
+      arcs += `<circle r="${R}" cx="56" cy="56" fill="none" stroke="var(--st-${id})" stroke-width="13" stroke-dasharray="${Math.max(L - 1.5, .1)} ${C}" stroke-dashoffset="${-off}" transform="rotate(-90 56 56)"/>`; off += L; });
+    else arcs = `<circle r="${R}" cx="56" cy="56" fill="none" stroke="var(--border)" stroke-width="13"/>`;
+    const legend = ORDER.filter(id => c[id]).map(id => `<span><i style="background:var(--st-${id})"></i>${c[id]} ${statusLabel(id).toLowerCase()}</span>`).join('') || '<span>Nothing scheduled</span>';
+    const segs = ORDER.filter(id => c[id]).map(id => `<span style="flex:${c[id]};background:var(--st-${id})" title="${statusLabel(id)}: ${c[id]}"></span>`).join('') || '<span style="flex:1;background:var(--border)"></span>';
+    return { ring: `<div class="lc-ring"><svg viewBox="0 0 112 112"><g>${arcs}</g><text x="56" y="56" text-anchor="middle" class="rn">${total ? done + '/' + total : '—'}</text><text x="56" y="72" text-anchor="middle" class="rs">${total ? 'done' : 'no tasks'}</text></svg>
+        <div class="lc-name">${label}</div><div class="lc-leg">${legend}</div></div>`,
+      bar: `<div class="lc-bar"><div class="lc-top"><span class="lc-name">${label}</span><span class="lc-num"><b>${done}</b>/${total} done</span></div>
+        <div class="lc-seg">${segs}</div><div class="lc-leg">${legend}</div></div>` };
+  };
+  const a = one('Today', tI), b = one('This week · doable now', wI);
+  return `<div class="card lchart"><div class="card-label">${icon('chart-pie')}To-do Progress</div>
+    <div class="lc-rings">${a.ring}${b.ring}</div><div class="lc-bars">${a.bar}${b.bar}</div></div>`;
+}
+function fitLapChart() {
+  const ch = document.querySelector('.lchart'), right = document.querySelector('.lh-right');
+  if (!ch || !right) return;
+  ch.classList.toggle('as-bars', right.offsetHeight < 600);
+}
+function lapCalendarHTML() {
+  const ws = ui.calWeek, we = Rec.addDays(ws, 6);
+  const range = MONTH_FULL[+ws.slice(5, 7) - 1] + (ws.slice(5, 7) !== we.slice(5, 7) ? ' – ' + MONTH_FULL[+we.slice(5, 7) - 1] : '') + ' ' + we.slice(0, 4);
+  let cols = '';
+  for (let i = 0; i < 7; i++) {
+    const ds = Rec.addDays(ws, i), items = dayItems(ds);
+    const pills = items.map(it => { const st = stOf(it);
+      return `<button class="lcp${FINISHED[st] ? ' fin' : ''}${st === 'missed' ? ' missed' : ''}" style="--ic:${iconColor(it.t)}" data-act="status" data-task="${it.t.id}" data-date="${it.key}" title="${esc(it.t.name)} · ${statusLabel(st)}${it.t.time ? ' · ' + fmt12(it.t.time) : ''}">
+        <span class="lcp-ic">${taskIcon(it.t)}</span><span class="lcp-n">${esc(it.t.name)}</span></button>`; }).join('');
+    cols += `<div class="lcd${ds === ui.today ? ' now' : ''}${ds < ui.today ? ' past' : ''}"><div class="lcd-h"><span>${DOW[i]}</span><b>${+ds.slice(8)}</b></div>
+      ${pills}<button class="lcd-add" data-act="new-task" data-date="${ds}" aria-label="Add a task on ${fmtShort(ds)}">${icon('plus')}</button></div>`;
+  }
+  return `<div class="lcal"><div class="lcal-h"><b>${range}</b><span class="spacer"></span>
+    <button class="chip small" data-act="lcal-prev" aria-label="Previous week">${icon('chevron-left')}</button>
+    <button class="chip small" data-act="lcal-today">Today</button>
+    <button class="chip small" data-act="lcal-next" aria-label="Next week">${icon('chevron-right')}</button></div>
+    <div class="lcal-g">${cols}</div></div>`;
+}
+function lapHomeHTML() {
+  const tI = todayItems(), wI = weekItems(), und = undatedItems();
+  const lists = [...metaVal('lists', []), NOTES_LIST], shown = homeLists().map(id => lists.find(l => l.id === id)).filter(Boolean);
+  return `${tagBar()}
+    <section class="lh-r1">
+      <div class="lh-left">${lapChartHTML(dueToday(tI), wI.filter(availableNow))}</div>
+      <div class="lh-right">
+        <div class="block lap-any"><h2 class="hblock h4">Anytime</h2>${tableHTML(und, 'anytime', 'No undated tasks. Make one with <b>No date</b> in a new task.', null, 'lap-any')}</div>
+        ${shown.map((l, k) => listCardHTML(l, k, 'block')).join('') || `<div class="block muted small">Pick lists to show here with the ${solid('fa:house', 'inline')} button on the Lists tab.</div>`}
+      </div></section>
+    <section class="lh-r2">
+      <div class="block"><h2 class="hblock h1">Today’s To-do</h2>${tableHTML(tI, 'today', 'All clear for today')}</div>
+      <div class="block"><h2 class="hblock h2">This Week’s To-do</h2><div class="hint">${WEEK_HINT}</div>${tableHTML(wI, 'week', 'Nothing this week')}</div>
+    </section>
+    <section class="block lh-cal"><h2 class="hblock h3">This Week</h2>${lapCalendarHTML()}</section>
+    <section class="block lh-streaks"><h2 class="hblock h4">Pinned streaks</h2>${streaksHTML(() => true, pinned())}</section>`;
+}
+function lapListsHTML() {
+  const lists = metaVal('lists', []);
+  return `<div class="lgrid">${[...lists, NOTES_LIST].map((l, k) => listCardHTML(l, k, 'block', { pin: true })).join('')}
+    <button class="block newlist" data-act="list-add">${icon('plus')}New list</button></div>`;
+}
 
 function navHTML(where) {
   return `<nav class="nav nav-${where}" aria-label="Pages">${TABS.map(t =>
@@ -663,37 +787,17 @@ function nextDue(t) {
   return null;
 }
 
-function tagsHTML() {
-  const vs = views();
-  if (!vs.find(v => v.id === ui.view)) ui.view = (vs[0] || {}).id;
-  const v = vs.find(x => x.id === ui.view);
-  const chips = `<div class="filters view-chips">${vs.map(x => `<button class="chip${x.id === ui.view ? ' on' : ''}" data-act="view" data-view="${x.id}" style="--vc:${slotColor(viewSlot(x))}">${viewIcon(x)}${esc(x.name)}</button>`).join('')}
-    <button class="chip" data-act="settings" data-sec="views" aria-label="Edit tags">${icon('pencil')}</button></div>`;
-  if (!v) return chips + '<div class="empty">No tag views yet. Add some in Settings.</div>';
-  const pred = viewPred(v);
-  const tI = todayItems(pred), upcomingAll = upcomingItems(pred, 14), und = undatedItems(pred);
-  const seen = new Set(tI.map(it => it.t.id)), upcoming = upcomingAll.filter(it => !seen.has(it.t.id) && seen.add(it.t.id));
-  const all = taskList().filter(pred).sort((a, b) => a.name.localeCompare(b.name));
-  const allRows = all.map(t => { const nd = nextDue(t); return `<button class="lrow" data-act="edit-task" data-task="${t.id}">
-      <span class="ticon" style="--ic:${iconColor(t)}">${taskIcon(t)}</span>
-      <span class="ntext"><span class="nm">${esc(t.name)}</span><span class="meta">${esc(repeatText(t))}</span></span>
-      <span class="due"><span class="sub">${nd ? (nd === ui.today ? 'Today' : fmtDow(nd)) : '—'}</span></span></button>`; }).join('');
-  const catHint = (v.cats || []).join(', ');
-  return `${chips}
-    ${stickyPie([...dueToday(tI), ...upcomingAll.filter(it => it.date <= Rec.addDays(ui.today, 6) && !isDailyTask(it.t) && availableNow(it))], 'Doable now')}
-    <section class="grid2">
-      <div class="block"><h2 class="hblock h1">Today</h2>${tableHTML(tI, 'today', 'Nothing due today', v, 'tag-' + v.id + '-today')}</div>
-      <div class="block"><h2 class="hblock h2">Coming up</h2><div class="hint">Next date for each task, up to 2 weeks out</div>${tableHTML(upcoming, 'week', 'Nothing in the next 2 weeks', v, 'tag-' + v.id + '-up')}</div>
-    </section>
-    ${und.length ? `<div class="block"><h2 class="hblock h1">Anytime</h2>${tableHTML(und, 'anytime', '', v, 'tag-' + v.id + '-any')}</div>` : ''}
-    <div class="block"><h2 class="hblock h3">All ${esc(v.name)} tasks</h2>
-      <div class="hint">Tasks with the ${(v.cats || []).length > 1 ? 'categories' : 'category'} <b>${esc(catHint)}</b></div>
-      <div class="table">${allRows || '<div class="empty">None yet. Give a task one of these categories to see it here.</div>'}</div></div>
-    <div class="block"><h2 class="hblock h4">Streaks</h2>${streaksHTML(pred)}</div>
-    <div class="cp-spacer"></div>`;
-}
 
 const WEEK_HINT = 'Today and the next 6 days, except everyday tasks. What you can do now comes first; faded ones can’t be started yet. Repeating tasks show their next date only.';
+// Tag chips: filter the page's lists, charts and calendar to one tag view.
+function tagBar() {
+  const vs = views(), cur = activeTag();
+  return `<div class="filters view-chips tag-bar">
+    <button class="chip${cur ? '' : ' on'}" data-act="tag-filter" data-view="">${icon('list-todo')}All</button>
+    ${vs.map(x => `<button class="chip${cur && x.id === cur.id ? ' on' : ''}" data-act="tag-filter" data-view="${x.id}" style="--vc:${slotColor(viewSlot(x))}">${viewIcon(x)}${esc(x.name)}</button>`).join('')}
+    <button class="chip" data-act="settings" data-sec="views" aria-label="Edit tags">${icon('pencil')}</button></div>`;
+}
+const withTag = label => label; // the page title shows the active tag (“Today • Cleaning”)
 function stickyPie(items, label) {
   return `<section class="chart-sticky">${pieHTML(items, label, true)}</section>`;
 }
@@ -703,50 +807,53 @@ function threeDayHTML() {
     const ds = Rec.addDays(ui.today, k), items = dayItems(ds);
     return `<div class="td-col${k === 0 ? ' now' : ''}"><div class="td-head"><b>${name}</b><span>${fmtDow(ds)}</span></div>
       ${items.length ? items.map(it => { const st = stOf(it);
-        return `<button class="td-item${FINISHED[st] ? ' fin' : ''}" data-act="status" data-task="${it.t.id}" data-date="${it.key}">
+        return `<button class="td-item${FINISHED[st] ? ' fin' : ''}${st === 'missed' ? ' missed' : ''}" data-act="status" data-task="${it.t.id}" data-date="${it.key}">
           <span class="dot" style="background:var(--st-${st})"></span><span class="td-name">${esc(it.t.name)}</span>${it.t.time ? `<span class="td-time">${fmt12(it.t.time).replace(':00', '').replace(' ', '')}</span>` : ''}</button>`; }).join('')
         : '<div class="td-empty">Nothing</div>'}
       <button class="td-add" data-act="new-task" data-date="${ds}" aria-label="Add a task on ${name}">${icon('plus')}</button></div>`; }).join('')}</div>`;
 }
+// Layout: on phones everything stacks (the chart stays pinned at the top and shrinks as
+// you scroll). On a laptop (≥1100 px) charts sit in a sticky column on the left.
 function pageBody() {
   const wide = isWide();
   switch (ui.tab) {
     case 'today': {
       const tI = todayItems();
-      return `${stickyPie(dueToday(tI), "Today's Progress")}
+      return `${tagBar()}<div class="split">
+        <aside class="split-side">${stickyPie(dueToday(tI), withTag("Today's Progress"))}</aside>
+        <div class="split-main">
         <section class="grid2">
           <div class="block"><h2 class="hblock h1">Today’s To-do</h2>${tableHTML(tI, 'today', 'All clear for today')}</div>
           <div class="block"><h2 class="hblock h3">Yesterday · Today · Tomorrow</h2>${threeDayHTML()}</div>
         </section>
         <section class="grid2">
           <div class="block"><h2 class="hblock h4">Notes</h2><div class="hint">Small things to remember. Tap ${icon('calendar-plus', 'inline')} to make one a task.</div>${notesHTML()}</div>
-          <div class="block"><h2 class="hblock h2">Streaks</h2>${streaksHTML()}</div>
-        </section>
+          <div class="block"><h2 class="hblock h2">Streaks</h2>${streaksHTML(passesFilter)}</div>
+        </section></div></div>
         <div class="cp-spacer"></div>`;
     }
     case 'week': {
       const wI = weekItems();
-      return `${stickyPie(wI.filter(availableNow), "Doable now")}
+      return `${tagBar()}<div class="split">
+        <aside class="split-side">${stickyPie(wI.filter(availableNow), withTag("Doable now"))}</aside>
+        <div class="split-main">
         <section class="grid2">
           <div class="block"><h2 class="hblock h2">This Week’s To-do</h2><div class="hint">${WEEK_HINT}</div>${tableHTML(wI, 'week', 'Nothing this week')}</div>
           <div class="block"><h2 class="hblock h3">Calendar</h2>${calendarHTML()}</div>
-        </section>
+        </section></div></div>
         <div class="cp-spacer"></div>`;
     }
-    case 'tags': return tagsHTML();
     case 'lists': return listsHTML();
     default: {
       const tI = todayItems(), wI = weekItems(), und = undatedItems();
-      return `<section class="charts">${pieHTML(dueToday(tI), "Today's Progress")}${pieHTML(wI.filter(availableNow), "Week · doable now")}</section>
-        <section class="grid2">
-          <div class="block"><h2 class="hblock h1">Today’s To-do</h2>${tableHTML(tI, 'today', 'All clear for today')}</div>
-          <div class="block"><h2 class="hblock h2">This Week’s To-do</h2><div class="hint">${WEEK_HINT}</div>${tableHTML(wI, 'week', 'Nothing this week')}</div>
-        </section>
-        <section class="grid2">
-          <div class="block"><h2 class="hblock h4">Anytime</h2><div class="hint">Tasks with no date</div>${tableHTML(und, 'anytime', 'No undated tasks. Make one with <b>No date</b> in a new task.', null, 'ov-any')}</div>
-          <div class="block"><h2 class="hblock h3">Pinned streaks</h2>${streaksHTML(() => true, pinned())}</div>
-        </section>
-        ${wide ? `<section><div class="block">${listsHTML(true)}</div></section>` : ''}`;
+      return `${tagBar()}<div class="ov">
+        <section class="charts ov-charts">${pieHTML(dueToday(tI), withTag("Today's Progress"))}${pieHTML(wI.filter(availableNow), withTag("Week · doable now"))}</section>
+        <div class="block ov-today"><h2 class="hblock h1">Today’s To-do</h2>${tableHTML(tI, 'today', 'All clear for today')}</div>
+        <div class="block ov-week"><h2 class="hblock h2">This Week’s To-do</h2><div class="hint">${WEEK_HINT}</div>${tableHTML(wI, 'week', 'Nothing this week')}</div>
+        <div class="block ov-any"><h2 class="hblock h4">Anytime</h2><div class="hint">Tasks with no date</div>${tableHTML(und, 'anytime', 'No undated tasks. Make one with <b>No date</b> in a new task.', null, 'ov-any')}</div>
+        <div class="block ov-streaks"><h2 class="hblock h3">Pinned streaks</h2>${streaksHTML(() => true, pinned())}</div>
+        ${wide ? `<div class="block ov-lists">${listsHTML(true)}</div>` : ''}
+      </div>`;
     }
   }
 }
@@ -760,7 +867,7 @@ function render() {
   document.body.classList.toggle('photo-bg', layout === 'background');
   let bg = document.getElementById('bgphoto');
   if (layout === 'background') {
-    if (!bg) { bg = document.createElement('div'); bg.id = 'bgphoto'; bg.setAttribute('aria-hidden', 'true'); bg.innerHTML = '<img alt="">'; document.body.prepend(bg); }
+    if (!bg) { bg = document.createElement('div'); bg.id = 'bgphoto'; bg.setAttribute('aria-hidden', 'true'); bg.innerHTML = '<img alt="" onerror="driveFallback(this)">'; document.body.prepend(bg); }
     const img = bg.firstChild;
     if (img.getAttribute('src') !== banner.url) img.setAttribute('src', banner.url);
     img.style.setProperty('--fx', banner.focus); img.style.setProperty('--fxp', banner.phoneFocus);
@@ -768,10 +875,13 @@ function render() {
   const focus = banner ? `--fx:${esc(banner.focus)};--fxp:${esc(banner.phoneFocus)}` : '';
   const top = layout === 'background'
     ? '<div class="bg-spacer"></div>'
-    : `<div class="banner">${banner ? `<img src="${esc(banner.url)}" alt="" style="${focus}">` : bannerSVG(season, holiday, +ui.today.slice(0, 4))}</div>`;
+    : `<div class="banner">${banner ? `<img src="${esc(banner.url)}" alt="" style="${focus}" onerror="driveFallback(this)">` : bannerSVG(season, holiday, +ui.today.slice(0, 4))}</div>`;
   const title = metaVal('title', 'Home Dashboard');
-  const curView = views().find(v => v.id === ui.view) || views()[0];
-  const tabTitle = { overview: title, today: 'Today', week: 'This Week', tags: curView ? curView.name : 'Tags', lists: 'Lists' }[ui.tab] || title;
+  const lap = isLap();
+  document.body.classList.toggle('lap', lap);
+  if (lap) return renderLap({ top, title, banner, y });
+  const tabTitle = { overview: title, today: 'Today', week: 'This Week', lists: 'Lists' }[ui.tab] || title;
+  const tagTitle = ui.tab !== 'lists' && activeTag() ? ` <span class="tagt">• ${esc(activeTag().name)}</span>` : '';
   document.getElementById('app').innerHTML = `
   <header class="topbar">
     <span class="crumb">${pageIconHTML('accent')}<span>${esc(title)}</span></span>
@@ -784,7 +894,7 @@ function render() {
   <main class="page tab-${ui.tab}">
     <div class="hero">
       <div class="page-icon">${pageIconHTML()}</div>
-      <h1 class="title">${esc(tabTitle)}</h1>
+      <h1 class="title">${esc(tabTitle)}${tagTitle}</h1>
       <div class="subtitle">${fmtLong(ui.today)}</div>
       ${navHTML('top')}
     </div>
@@ -811,11 +921,11 @@ const overlay = () => document.getElementById('overlay');
 function closeOverlay() { overlay().innerHTML = ''; overlay().className = ''; ed = null; }
 
 function openStatusMenu(btn) {
-  const { task, date } = btn.dataset, cur = statusOf(task, date);
+  const { task, date } = btn.dataset, cur = S.tasks[task] ? effStatus(S.tasks[task], date) : statusOf(task, date);
   const r = btn.getBoundingClientRect();
   overlay().className = 'on menu-mode';
   overlay().innerHTML = `<div class="scrim" data-act="close"></div>
-    <div class="menu" style="left:${Math.min(r.left, innerWidth - 200)}px;top:${Math.max(8, Math.min(r.bottom + 4, innerHeight - 300))}px">
+    <div class="menu" style="left:${Math.min(r.left, innerWidth - 200)}px;top:${Math.max(8, Math.min(r.bottom + 4, innerHeight - 340))}px">
       ${STATUSES.map(s => `<button class="menu-item${s.id === cur ? ' cur' : ''}" data-act="set-status" data-task="${task}" data-date="${date}" data-status="${s.id}">
         ${pill(s.id, '', 'span')}${s.id === cur ? icon('check') : ''}</button>`).join('')}
     </div>`;
@@ -888,7 +998,7 @@ function renderEditor() {
   const streakFields = !repeating ? '' : `
       <div class="adv-group"><div class="adv-title">${solid('fa:fire-flame-curved', 'inline')}Streak</div>
       <label class="toggle"><input type="checkbox" data-field="streak" ${t.streak ? 'checked' : ''}><span class="sw"></span>
-        <span><b>Track streak</b><span class="muted small">Shows in Streaks on Today and its tag page</span></span></label>
+        <span><b>Track streak</b><span class="muted small">Shows in Streaks on Today (and when filtering by its tag)</span></span></label>
       ${t.streak ? `<label class="toggle"><input type="checkbox" data-field="_pin" ${t._pin ? 'checked' : ''}${pinFull ? ' disabled' : ''}><span class="sw"></span>
         <span><b>Pin to Overview</b><span class="muted small">${pinFull ? '5 streaks are already pinned. Unpin one first.' : 'Up to 5 streaks show at the bottom of Overview'}</span></span></label>
       <div class="field inline"><label>Goal (optional)</label><input type="number" min="1" max="999" data-field="streakGoal" class="num" value="${esc(t.streakGoal || '')}" placeholder="e.g. 30"><span class="muted">in a row</span></div>
@@ -947,7 +1057,8 @@ function renderEditor() {
       ${stats}
     </div>
     <div class="sheet-foot">
-      ${t._new ? '' : one ? `<button class="btn" data-act="ed-skip">${icon('x')}Skip this day</button>` : `<button class="btn danger" data-act="ed-delete">${icon('trash-2')}Delete</button>`}
+      ${t._new ? '' : one ? `<button class="btn" data-act="ed-skip">${icon('x')}Skip this day</button>` : `<button class="btn danger" data-act="ed-delete" aria-label="Delete">${icon('trash-2')}<span class="lbl">Delete</span></button>
+        <button class="btn" data-act="ed-dup" aria-label="Duplicate">${icon('copy')}<span class="lbl">Duplicate</span></button>`}
       <span class="spacer"></span>
       <button class="btn" data-act="close">Cancel</button>
       <button class="btn primary" data-act="ed-save">Save</button>
@@ -1049,7 +1160,7 @@ function notifyHint(t) {
   return t.time ? `Leave blank to be reminded at the task’s time (${fmt12(t.time)}).` : 'Pick a time for the reminder. The task itself doesn’t need one.';
 }
 const TASK_FIELDS = ['name', 'icon', 'iconData', 'color', 'category', 'start', 'time', 'repeat', 'interval', 'weekdays', 'dayOfMonth',
-  'end', 'early', 'earlyDays', 'notify', 'notifyTime', 'notes', 'streak', 'streakGoal', 'shieldMax', 'shieldEvery'];
+  'end', 'early', 'earlyDays', 'notify', 'notifyTime', 'notes', 'streak', 'streakGoal', 'shieldMax', 'shieldEvery', 'rank'];
 const ONE_FIELDS = ['name', 'icon', 'iconData', 'color', 'time', 'notes'];
 // Capitalize a title's first letter (leaves names like "iPhone" alone).
 const capFirst = x => /^[a-z](?![A-Z])/.test(x) ? x[0].toUpperCase() + x.slice(1) : x;
@@ -1116,67 +1227,178 @@ function renameCategory(from, to) {
   setMeta('categories', list);
 }
 
+// Settings → Reminders: is the 5-minute check running, and what's set to remind today?
+function reminderStatusHTML() {
+  const r = ui.reminders, ago = r && r.lastRun ? Math.round((Date.now() - r.lastRun) / 60000) : null;
+  let state;
+  if (!r) state = `${icon('cloud-off')}Can’t check yet. Update the Google script (see the red bar), then reopen Settings.`;
+  else if (r.triggers === 0) state = `${icon('x')}<b>Reminders aren’t running</b>: the 5-minute check is missing. <button class="linkbtn" data-act="st-fix-reminders">Turn it back on</button>`;
+  else if (ago === null) state = `${icon('clock')}The reminder check is set up but hasn’t run yet. Give it 5 minutes.`;
+  else if (ago > 20) state = `${icon('x')}<b>The reminder check last ran ${ago < 120 ? ago + ' minutes' : Math.round(ago / 60) + ' hours'} ago</b> (it should run every 5). <button class="linkbtn" data-act="st-fix-reminders">Restart it</button>`;
+  else state = `${icon('check')}Reminder check is running (last ran ${ago <= 1 ? 'just now' : ago + ' min ago'}).`;
+  const items = instancesOn(ui.today).filter(it => it.t.notify && !FINISHED[stOf(it)]);
+  const rows = items.map(it => { const tm = it.t.notifyTime || it.t.time;
+    return `<li>${tm ? `<b>${fmt12(tm)}</b>` : `<b class="warn">No time</b>`} ${esc(it.t.name)}${tm ? '' : ' <span class="muted">(won’t remind: set a time or “Remind me at”)</span>'}</li>`; }).join('');
+  return `<div class="field" id="sec-reminders"><label>Reminders</label>
+    <div class="rem-state">${state}</div>
+    ${r && r.lastSent ? `<div class="muted small">Last reminder sent: ${esc(r.lastSent)}</div>` : ''}
+    <div class="muted small">Today${items.length ? ':' : ': nothing set to remind.'}</div>${rows ? `<ul class="rem-list">${rows}</ul>` : ''}
+    <div class="muted small">If the test notification below doesn’t arrive, check the ntfy app is subscribed to your topic and is allowed to send notifications (on Android also set its battery use to Unrestricted).</div></div>`;
+}
+/* ---------- Settings: a menu, and a page for each part ---------- */
+const SET_PAGES = {
+  look: { title: 'Look & theme', icon: 'fa:palette', sub: 'Title, theme, photos, falling particles, month icons' },
+  tags: { title: 'Tags & categories', icon: 'fa:tags', sub: 'Tag filters, categories and their colors' },
+  streaks: { title: 'Streaks', icon: 'fa:fire-flame-curved', sub: 'Shields: how many and how fast you earn them' },
+  reminders: { title: 'Reminders', icon: 'fa:bell', sub: 'Is the reminder check running, test notification' },
+  sync: { title: 'Sync & devices', icon: 'fa:mobile-screen', sub: 'Google Sheet connection, link for another device' },
+  data: { title: 'Data', icon: 'fa:database', sub: 'Sync now, export a backup' },
+  photos: { title: 'Photos', parent: 'look' },
+  icons: { title: 'Month & holiday icons', parent: 'look' }
+};
+// old section names (used around the app) → the page that holds them
+const SEC_PAGE = { views: 'tags', cats: 'tags' };
 function openSettings(section) {
-  const pref = metaVal('theme', 'auto');
-  if (section) setTimeout(() => { const el = document.getElementById('sec-' + section); el && el.scrollIntoView({ block: 'start' }); }, 30);
-  const link = config.url ? location.origin + location.pathname + '#connect=' + btoa(JSON.stringify(config)) : '';
-  overlay().className = 'on sheet-mode';
+  const page = SET_PAGES[section] ? section : SEC_PAGE[section] || '';
+  const body = overlay().querySelector('.sheet-body');
+  const keepScroll = body && ui.setPage === page ? body.scrollTop : 0;
+  ui.setPage = page;
+  const P = SET_PAGES[page];
+  const head = page
+    ? `<button class="iconbtn" data-act="settings" data-sec="${P.parent || ''}" aria-label="Back">${icon('chevron-left')}</button><b>${esc(P.title)}</b>`
+    : `<b>Settings</b>`;
+  overlay().className = 'on sheet-mode settings-mode';
   overlay().innerHTML = `<div class="scrim" data-act="close"></div>
-  <div class="sheet" role="dialog" aria-label="Settings">
-    <div class="sheet-head"><b>Settings</b><span class="spacer"></span><button class="iconbtn" data-act="close" aria-label="Close">${icon('x')}</button></div>
-    <div class="sheet-body">
-      <div class="field"><label>Dashboard title</label><input id="set-title" value="${esc(metaVal('title', 'Home Dashboard'))}"></div>
+  <div class="sheet settings" role="dialog" aria-label="Settings">
+    <div class="sheet-head">${head}<span class="spacer"></span><button class="iconbtn" data-act="close" aria-label="Close">${icon('x')}</button></div>
+    <div class="sheet-body">${settingsPageHTML(page)}</div></div>`;
+  const nb = overlay().querySelector('.sheet-body');
+  if (keepScroll) nb.scrollTop = keepScroll;
+  else if (section && SEC_PAGE[section]) setTimeout(() => { const el = document.getElementById('sec-' + section); el && el.scrollIntoView({ block: 'start' }); }, 30);
+}
+const menuRow = (page, title, sub, ic) => `<button class="set-row" data-act="settings" data-sec="${page}">
+  <span class="set-ic">${solid(ic)}</span><span class="set-t"><b>${esc(title)}</b><span class="muted small">${esc(sub)}</span></span>${icon('chevron-right')}</button>`;
+function settingsPageHTML(page) {
+  const pref = metaVal('theme', 'auto');
+  switch (page) {
+    case '': return Object.entries(SET_PAGES).filter(([, p]) => !p.parent).map(([k, p]) => menuRow(k, p.title, p.sub, p.icon)).join('') +
+      `<div class="muted small set-foot">${config.url ? (ui.sync === 'ok' ? 'Synced with your Google Sheet' : 'Sync: ' + esc(ui.sync)) : 'Not connected: saved on this device only'}</div>`;
+    case 'look': return `
+      <div class="field"><label>Dashboard title</label><input id="set-title" value="${esc(metaVal('title', 'Home Dashboard'))}" autocapitalize="words"></div>
       <div class="field"><label>Theme</label><select id="set-theme">
         <option value="auto"${MONTH_KEYS.includes(pref) ? '' : ' selected'}>Auto: follows the date (with holidays)</option>
         ${MONTHS.map(m => `<option value="${m.key}"${pref === m.key ? ' selected' : ''}>${m.label}</option>`).join('')}</select>
         <span class="muted small">Pick a month to preview or keep its photos and colors.</span></div>
-      <div class="field" id="sec-views"><label>Tag views</label>
-        <span class="muted small">Each view on the Tags page shows tasks with any of its categories (comma-separated).</span>
-        <span class="muted small">Drag ${solid('fa:grip-vertical', 'inline')} to reorder. Tap a view’s icon to change its icon and color.</span>
-        <div id="view-rows">${views().map((v, i) => `<div class="view-row" data-i="${i}">
-          <span class="grip" aria-label="Drag to reorder">${solid('fa:grip-vertical')}</span>
-          <button class="iconpick small" data-act="pick-view-icon" data-i="${i}" aria-label="Icon and color" style="--ic:${slotColor(viewSlot(v))}">${viewIcon(v)}</button>
-          <input data-view-name="${i}" value="${esc(v.name)}" placeholder="Name">
-          <input data-view-cats="${i}" value="${esc((v.cats || []).join(', '))}" placeholder="Categories">
-          <button class="iconbtn faint" data-act="view-del" data-i="${i}" aria-label="Remove">${icon('x')}</button></div>`).join('')}</div>
-        <div class="btnrow"><button class="btn" data-act="view-add">${icon('plus')}Add view</button></div></div>
-      <div class="field" id="sec-cats"><label>Categories</label>
-        <span class="muted small">Tap the dot to change a category’s color. Rename by editing; ${icon('x', 'inline')} removes a category from every task that uses it.</span>
-        ${allCategories().map(c => { const n = taskList().filter(t => (t.category || '').toLowerCase() === c.toLowerCase()).length;
-          return `<div class="cat-row"><button class="cat-dot" data-act="cat-color" data-v="${esc(c)}" style="background:${slotColor(catColorSlot(c))}" aria-label="Color for ${esc(c)}"></button><input data-cat-rename="${esc(c)}" value="${esc(c)}"><span class="muted small">${n} task${n === 1 ? '' : 's'}</span>
-            <button class="iconbtn faint" data-act="cat-del" data-v="${esc(c)}" aria-label="Delete ${esc(c)}">${icon('x')}</button></div>`; }).join('') || '<div class="muted small">No categories yet.</div>'}
-        <div class="cat-row"><span class="cat-dot ghost"></span><input id="cat-new" placeholder="New category" enterkeyhint="done" autocapitalize="words"><span></span><button class="iconbtn faint" data-act="cat-add" aria-label="Add">${icon('plus')}</button></div></div>
-      <div class="field" id="sec-streaks"><label>Streak shields</label>
-        <span class="muted small">A shield covers a missed day instead of breaking a streak. These are the defaults; any task can use its own under More options.</span>
-        <div class="field inline"><input type="number" id="set-shield-max" class="num" min="0" max="10" value="${shieldMaxDefault()}" inputmode="numeric"><span>shields can be saved up (0 turns them off)</span></div>
-        <div class="field inline"><span>Earn one every</span><input type="number" id="set-shield-every" class="num" min="1" max="99" value="${shieldEveryDefault()}" inputmode="numeric"><span>done in a row</span></div></div>
-      <div class="field"><label>Photo layout</label><div class="seg">${[['auto', 'Auto'], ['banner', 'Banner'], ['background', 'Full background']].map(([k, l]) =>
-        `<button class="${metaVal('photoLayout', 'auto') === k ? 'on' : ''}" data-act="set-layout" data-v="${k}">${l}</button>`).join('')}</div>
-        <span class="muted small">Auto uses large photos as the full background and wide strips as a banner.</span></div>
+      ${menuRow('photos', 'Photos', 'Layout, take photos out of the rotation, add your own', 'fa:image')}
+      ${menuRow('icons', 'Month & holiday icons', 'Pick the icon for each month and holiday', 'fa:ghost')}
       <label class="toggle"><input type="checkbox" id="set-holidays" ${metaVal('holidays', true) ? 'checked' : ''}><span class="sw"></span>
         <span><b>Holidays</b><span class="muted small">Holiday photos, icons and particles on their dates</span></span></label>
       <label class="toggle"><input type="checkbox" id="set-motion" ${LS.get('motion', true) ? 'checked' : ''}><span class="sw"></span>
-        <span><b>Falling particles</b><span class="muted small">Leaves, petals, snow and sparkles drifting down the page (this device only).</span></span></label>
-      <h3>Google Sheet sync</h3>
-      <div class="field"><label>Web app URL</label><input id="set-url" value="${esc(config.url)}" placeholder="https://script.google.com/macros/s/…/exec"></div>
-      <div class="field"><label>Secret key</label><input id="set-key" value="${esc(config.key)}" placeholder="from the Apps Script log"></div>
-      <div class="btnrow"><button class="btn primary" data-act="st-connect">${config.url ? 'Reconnect' : 'Connect'}</button>
-        ${config.url ? `<button class="btn" data-act="st-disconnect">Disconnect</button>` : ''}</div>
-      <div id="st-msg" class="muted small">${config.url ? 'Status: ' + esc(ui.sync) + (ui.syncMsg ? ' – ' + esc(ui.syncMsg) : '') : 'Not connected. Tasks are saved on this device only.'}</div>
-      ${link ? `<div class="field"><label>Link for your other device</label><div class="muted small">Open this link once on your other phone or laptop to connect it automatically. Keep it private, since it contains your key. On an iPhone the link opens in Safari, not the home-screen app, so paste the URL and key into Settings inside the home-screen app instead.</div>
-        <div class="btnrow"><button class="btn" data-act="st-copy" data-link="${esc(link)}">${icon('copy')}Copy link</button>
-        <button class="btn" data-act="st-test">${icon('bell-ring')}Send test notification</button></div></div>` : ''}
-      <div class="field" id="sec-icons"><label>Month &amp; holiday icons</label><span class="muted small">Tap one to choose a different icon. If the icon updater is set up on GitHub, your home-screen icon follows these too (it checks once a day).</span><div class="icon-tiles">
+        <span><b>Falling particles</b><span class="muted small">Leaves, petals, snow and sparkles drifting down the page (this device only)</span></span></label>`;
+    case 'photos': return photosPageHTML();
+    case 'icons': return `<div class="field" id="sec-icons"><span class="muted small">Tap one to choose a different icon. If the icon updater is set up on GitHub, your home-screen icon follows these too (it checks once a day).</span><div class="icon-tiles">
         ${[...MONTHS.map(m => [m.key, m.label.slice(0, 3), m.icon]), ...Object.entries(HOLIDAYS).map(([k, h]) => [k, h.label.replace("'s Day", '').replace('Fourth of July', 'July 4'), h.icon])].map(([k, l, def]) => {
           const pick = (metaVal('pageIcons', {}) || {})[k];
           const ic = pick && pick.data ? svgPath(pick.data.split('|')[0], pick.data.slice(pick.data.indexOf('|') + 1)) : solid(def);
           return `<button class="icon-tile" data-act="pick-page-icon" data-key="${k}" title="Change icon">${ic}<span>${esc(l)}</span></button>`; }).join('')}
-      </div></div>
-      <h3>Data</h3>
-      <div class="btnrow"><button class="btn" data-act="sync">${icon('refresh-cw')}Sync now</button><button class="btn" data-act="st-export">${icon('download')}Export backup</button></div>
-      <div class="muted small">Icons: Font Awesome Free (CC BY 4.0) and Material Symbols (Apache 2.0).</div>
-    </div>
-  </div>`;
+      </div></div>`;
+    case 'tags': return `
+      <div class="field" id="sec-views"><label>Tag filters</label>
+        <span class="muted small">Each tag filter (the buttons under the page title) shows tasks with any of its categories (comma-separated). Drag ${solid('fa:grip-vertical', 'inline')} to reorder. Tap a tag’s icon to change its icon and color.</span>
+        <div id="view-rows">${views().map((v, i) => `<div class="view-row" data-i="${i}">
+          <span class="grip" aria-label="Drag to reorder">${solid('fa:grip-vertical')}</span>
+          <button class="iconpick small" data-act="pick-view-icon" data-i="${i}" aria-label="Icon and color" style="--ic:${slotColor(viewSlot(v))}">${viewIcon(v)}</button>
+          <input data-view-name="${i}" value="${esc(v.name)}" placeholder="Name" autocapitalize="words">
+          <input data-view-cats="${i}" value="${esc((v.cats || []).join(', '))}" placeholder="Categories" autocapitalize="words">
+          <button class="iconbtn faint" data-act="view-del" data-i="${i}" aria-label="Remove">${icon('x')}</button></div>`).join('')}</div>
+        <div class="btnrow"><button class="btn" data-act="view-add">${icon('plus')}Add tag</button></div></div>
+      <div class="field" id="sec-cats"><label>Categories</label>
+        <span class="muted small">Tap the dot to change a category’s color. Rename by editing; ${icon('x', 'inline')} removes a category from every task that uses it.</span>
+        ${allCategories().map(c => { const n = taskList().filter(t => (t.category || '').toLowerCase() === c.toLowerCase()).length;
+          return `<div class="cat-row"><button class="cat-dot" data-act="cat-color" data-v="${esc(c)}" style="background:${slotColor(catColorSlot(c))}" aria-label="Color for ${esc(c)}"></button><input data-cat-rename="${esc(c)}" value="${esc(c)}" autocapitalize="words"><span class="muted small">${n} task${n === 1 ? '' : 's'}</span>
+            <button class="iconbtn faint" data-act="cat-del" data-v="${esc(c)}" aria-label="Delete ${esc(c)}">${icon('x')}</button></div>`; }).join('') || '<div class="muted small">No categories yet.</div>'}
+        <div class="cat-row"><span class="cat-dot ghost"></span><input id="cat-new" placeholder="New category" enterkeyhint="done" autocapitalize="words"><span></span><button class="iconbtn faint" data-act="cat-add" aria-label="Add">${icon('plus')}</button></div></div>`;
+    case 'streaks': return `<div class="field" id="sec-streaks"><label>Streak shields</label>
+        <span class="muted small">A shield covers a missed day instead of breaking a streak. These are the defaults; any task can use its own under More options.</span>
+        <div class="field inline"><input type="number" id="set-shield-max" class="num" min="0" max="10" value="${shieldMaxDefault()}" inputmode="numeric"><span>shields can be saved up (0 turns them off)</span></div>
+        <div class="field inline"><span>Earn one every</span><input type="number" id="set-shield-every" class="num" min="1" max="99" value="${shieldEveryDefault()}" inputmode="numeric"><span>done in a row</span></div></div>`;
+    case 'reminders': return config.url ? `${reminderStatusHTML()}
+      <div class="btnrow"><button class="btn" data-act="st-test">${icon('bell-ring')}Send test notification</button></div>`
+      : '<div class="muted small">Connect your Google Sheet first (Sync &amp; devices). Reminders are sent from there.</div>';
+    case 'sync': {
+      const link = config.url ? location.origin + location.pathname + '#connect=' + btoa(JSON.stringify(config)) : '';
+      return `<div class="field"><label>Web app URL</label><input id="set-url" value="${esc(config.url)}" placeholder="https://script.google.com/macros/s/…/exec"></div>
+      <div class="field"><label>Secret key</label><input id="set-key" value="${esc(config.key)}" placeholder="from the Apps Script log"></div>
+      <div class="btnrow"><button class="btn primary" data-act="st-connect">${config.url ? 'Reconnect' : 'Connect'}</button>
+        ${config.url ? `<button class="btn" data-act="st-disconnect">Disconnect</button>` : ''}</div>
+      <div id="st-msg" class="muted small">${config.url ? 'Status: ' + esc(ui.sync) + (ui.syncMsg ? ' – ' + esc(ui.syncMsg) : '') : 'Not connected. Tasks are saved on this device only.'}</div>
+      ${link ? `<div class="field"><label>Link for your other device</label><div class="muted small">Open this link once on your other phone or laptop to connect it automatically. Keep it private, since it contains your key.</div>
+        <div class="btnrow"><button class="btn" data-act="st-copy" data-link="${esc(link)}">${icon('copy')}Copy link</button></div></div>` : ''}`;
+    }
+    case 'data': return `<div class="btnrow"><button class="btn" data-act="sync">${icon('refresh-cw')}Sync now</button><button class="btn" data-act="st-export">${icon('download')}Export backup</button></div>
+      <div class="muted small">Icons: Font Awesome Free (CC BY 4.0) and Material Symbols (Apache 2.0). Photos from Unsplash unless you added them.</div>`;
+  }
+  return '';
+}
+
+/* ---------- Photos page ---------- */
+// Photos you added live in Google Drive; if one address doesn't load, try Drive's other one.
+function driveFallback(img) {
+  const m = (img.getAttribute('src') || '').match(/googleusercontent\.com\/d\/([\w-]+)/);
+  if (m && !img.dataset.fb) { img.dataset.fb = 1; img.src = 'https://drive.google.com/thumbnail?id=' + m[1] + '&sz=w2400'; }
+}
+const photoSetLabel = k => (MONTHS.find(m => m.key === k) || {}).label || (HOLIDAYS[k] || {}).label || k;
+const photoUrl = e => /^https?:/.test(e.file) ? e.file : 'banners/' + e.file;
+// the photo layout is chosen per device (a laptop can use the full background while a phone stays on Auto)
+const photoLayoutPref = () => LS.get('photoLayout', null) || metaVal('photoLayout', 'auto');
+function photosPageHTML() {
+  const { banner, holiday, monthIdx } = activeTheme();
+  const cur = holiday || MONTHS[monthIdx].key;
+  const set = ui.photoSet || cur, hidden = metaVal('hiddenPhotos', []) || [];
+  const list = [...((BANNERS || {})[set] || []), ...(((metaVal('customPhotos', {}) || {})[set]) || [])].map(e => typeof e === 'string' ? { file: e } : e);
+  const shown = list.filter(e => !hidden.includes(e.file)).length;
+  return `
+    <div class="field"><label>Layout <span class="muted">(this device)</span></label><div class="seg">${[['auto', 'Auto'], ['banner', 'Banner'], ['background', 'Full background']].map(([k, l]) =>
+      `<button class="${photoLayoutPref() === k ? 'on' : ''}" data-act="set-layout" data-v="${k}">${l}</button>`).join('')}</div>
+      <span class="muted small">Auto uses large photos as the full background and wide strips as a banner.</span></div>
+    ${banner && banner.file ? `<div class="field"><label>Today’s photo</label><div class="today-ph">
+      <img src="${esc(banner.url)}" alt="" onerror="driveFallback(this)"><span><b>${esc(photoSetLabel(cur))}</b><span class="muted small">${banner.credit ? esc(banner.credit) + ' on Unsplash' : 'Your photo'}</span>
+      <button class="btn small-btn" data-act="photo-hide-today" data-file="${esc(banner.file)}">${solid('fa:eye-slash', 'inline')}Take out of rotation</button></span></div></div>` : ''}
+    <div class="field"><label>Photos for <select id="photo-set">${[...MONTHS.map(m => [m.key, m.label]), ...Object.entries(HOLIDAYS).map(([k, h]) => [k, h.label])].map(([k, l]) =>
+      `<option value="${k}"${k === set ? ' selected' : ''}>${esc(l)}${k === cur ? ' (now)' : ''}</option>`).join('')}</select></label>
+      <span class="muted small">${list.length ? `${shown} of ${list.length} in the rotation. Tap a photo to take it out or put it back.` : 'No photos for this one yet.'}</span>
+      <div class="photo-grid">${list.map(e => `<button class="pg${hidden.includes(e.file) ? ' off' : ''}" data-act="photo-toggle" data-file="${esc(e.file)}" title="${esc(e.credit || 'Your photo')}">
+        <img src="${esc(photoUrl(e))}" alt="" loading="lazy" onerror="driveFallback(this)">${hidden.includes(e.file) ? `<span class="pg-x">${solid('fa:eye-slash')}</span>` : ''}
+        ${e.drive ? `<span class="pg-del" data-act="photo-delete" data-file="${esc(e.file)}" data-drive="${esc(e.drive)}" data-set="${esc(set)}" title="Delete this photo">${icon('trash-2')}</span>` : ''}</button>`).join('')}</div>
+      ${list.some(e => hidden.includes(e.file)) ? `<button class="linkbtn" data-act="photo-unhide-set" data-set="${esc(set)}">Bring all of these back</button>` : ''}</div>
+    <div class="field"><label>Add your own</label>
+      ${config.url ? `<label class="btn upload-btn">${solid('fa:upload', 'inline')}Add photos to ${esc(photoSetLabel(set))}…<input type="file" id="photo-upload" accept="image/*" multiple hidden></label>
+      <span class="muted small" id="upload-msg">They’re resized, saved in your Google Drive, and join ${esc(photoSetLabel(set))}’s rotation on every device. Anyone with a photo’s exact link can view it.</span>`
+      : '<span class="muted small">Connect your Google Sheet first (Sync &amp; devices); photos are saved to your Google Drive.</span>'}</div>`;
+}
+// Shrink a photo in the browser, then send it to the Google script (which saves it to Drive).
+async function uploadPhotos(files, set) {
+  const msg = () => document.getElementById('upload-msg');
+  let done = 0;
+  for (const f of files) {
+    if (msg()) msg().textContent = `Uploading ${done + 1} of ${files.length}…`;
+    try {
+      const img = await new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = rej; i.src = URL.createObjectURL(f); });
+      const k = Math.min(1, 2200 / Math.max(img.naturalWidth, img.naturalHeight));
+      const cv = document.createElement('canvas'); cv.width = Math.round(img.naturalWidth * k); cv.height = Math.round(img.naturalHeight * k);
+      cv.getContext('2d').drawImage(img, 0, 0, cv.width, cv.height);
+      const dataUrl = cv.toDataURL('image/jpeg', .82);
+      const pal = await Palette.clustersFor(dataUrl);
+      try { localStorage.removeItem('chores.pal3:' + dataUrl); } catch (e) {}
+      const res = await fetch(config.url, { method: 'POST', body: JSON.stringify({ key: config.key, ops: [{ t: 'uploadPhoto', set, name: f.name, data: dataUrl.split(',')[1], w: cv.width, h: cv.height, cl: pal.cl }] }) });
+      const data = await res.json();
+      if (!data.ok) throw new Error(data.error || 'server error');
+      if (data.notes && data.notes[0] && /^error/i.test(data.notes[0])) throw new Error(data.notes[0]);
+      loadServerState(data.state); done++;
+    } catch (e) { if (msg()) msg().textContent = 'Couldn’t upload ' + f.name + ': ' + (e.message || e) + '. If this is the first upload, approve Drive access in Apps Script (see the guide).'; return; }
+  }
+  if (overlay().innerHTML) openSettings('photos');
+  toast(`${solid('fa:image')}Added ${done} photo${done === 1 ? '' : 's'} to ${esc(photoSetLabel(set))}`);
 }
 
 async function connect(url, key) {
@@ -1199,7 +1421,7 @@ async function connect(url, key) {
     outbox.push({ t: 'meta', key: 'appUrl', value: location.origin + location.pathname, updatedAt: now() });
     save(); await flush();
     if (msg) msg.textContent = 'Connected ✓';
-    render(); if (overlay().innerHTML) openSettings();
+    render(); if (overlay().innerHTML) openSettings('sync');
     return true;
   } catch (e) {
     if (msg) msg.textContent = 'Could not connect: ' + (e.message || e) + '. Check the URL ends in /exec and the deployment is set to “Anyone”.';
@@ -1230,9 +1452,9 @@ document.addEventListener('click', e => {
     case 'ed-reset-one': if (ed && ed._key) { const id = ed.id, key = ed._key; closeOverlay(); setOverride(id, key, null); } break;
     case 'ed-skip': if (ed && ed._key) { const id = ed.id, key = ed._key; closeOverlay(); setStatus(id, key, 'not_needed'); } break;
     case 'ed-undated': if (ed) { ed.start = el.checked ? '' : (ed._orig && ed._orig.start) || ui.today; renderEditor(); } break;
-    case 'new-task': openEditor(null, { date: d.date, undated: d.undated === '1', cat: d.cat || (ui.tab === 'tags' && (views().find(v => v.id === ui.view) || {}).cats ? views().find(v => v.id === ui.view).cats[0] : '') }); break;
+    case 'new-task': openEditor(null, { date: d.date, undated: d.undated === '1', cat: d.cat || ((activeTag() || {}).cats || [])[0] || '' }); break;
+    case 'tag-filter': ui.tag = d.view || null; LS.set('tagFilter', ui.tag); render(); break;
     case 'tab': ui.tab = d.tab; LS.set('tab', d.tab); render(); break;
-    case 'view': ui.view = d.view; LS.set('view', d.view); render(); break;
     case 'note-to-task': { const n = S.items[d.item]; if (n) openEditor(null, { name: n.text, fromNote: n.id }); break; }
     case 'notes-clear':
       Object.values(S.items).filter(i => i.listId === '__notes' && i.checked)
@@ -1303,7 +1525,6 @@ document.addEventListener('click', e => {
       if (!confirm('Remove this view? Tasks are not affected.')) break;
       setMeta('views', vs); openSettings('views'); break;
     }
-    case 'filter': ui.filter = d.cat; render(); break;
     case 'cal-day': ui.calDay = d.date; render(); break;
     case 'cal-prev': case 'cal-next':
       ui.calWeek = Rec.addDays(ui.calWeek, a === 'cal-next' ? 7 : -7);
@@ -1332,11 +1553,40 @@ document.addEventListener('click', e => {
     }
     case 'item-toggle': { const i = S.items[d.item]; if (i) patchItem(i.id, { checked: !i.checked }); break; }
     case 'item-del': { const i = S.items[d.item]; if (i) patchItem(i.id, { deleted: true }); break; }
+    case 'list-home': {
+      const h = homeLists();
+      setMeta('homeLists', h.includes(d.list) ? h.filter(x => x !== d.list) : [...h, d.list]); break;
+    }
+    case 'ltab': ui.ltab = d.tab; LS.set('ltab', d.tab); render(); break;
+    case 'lcal-prev': case 'lcal-next': ui.calWeek = Rec.addDays(ui.calWeek, a === 'lcal-next' ? 7 : -7); render(); break;
+    case 'lcal-today': ui.calWeek = weekStart(ui.today); render(); break;
     case 'items-clear':
       Object.values(S.items).filter(i => i.listId === d.list && i.checked)
         .forEach(i => patchItem(i.id, { deleted: true }, false));
       render(); break;
     case 'settings': openSettings(d.sec); break;
+    case 'photo-hide-today': {
+      if (!d.file || !confirm('Take today’s photo out of the rotation? You can bring it back here any time.')) break;
+      const h = metaVal('hiddenPhotos', []) || [];
+      if (!h.includes(d.file)) setMeta('hiddenPhotos', [...h, d.file]);
+      openSettings('photos'); toast(`${solid('fa:image')}Photo taken out. Here’s the next one.`); break;
+    }
+    case 'photo-toggle': {
+      if (e.target.closest('[data-act=photo-delete]')) break;
+      const h = metaVal('hiddenPhotos', []) || [];
+      setMeta('hiddenPhotos', h.includes(d.file) ? h.filter(f => f !== d.file) : [...h, d.file]); openSettings('photos'); break;
+    }
+    case 'photo-unhide-set': {
+      const files = [...((BANNERS || {})[d.set] || []), ...(((metaVal('customPhotos', {}) || {})[d.set]) || [])].map(x => typeof x === 'string' ? x : x.file);
+      setMeta('hiddenPhotos', (metaVal('hiddenPhotos', []) || []).filter(f => !files.includes(f))); openSettings('photos'); break;
+    }
+    case 'photo-delete': {
+      e.stopPropagation();
+      if (!confirm('Delete this photo? It’s moved to your Google Drive trash.')) break;
+      commit({ t: 'deletePhoto', set: d.set, drive: d.drive, file: d.file }, false);
+      const m = Object.assign({}, metaVal('customPhotos', {}) || {}); m[d.set] = (m[d.set] || []).filter(x => x.file !== d.file);
+      S.meta.customPhotos = { value: m, updatedAt: Date.now() }; save(); render(); openSettings('photos'); break;
+    }
     case 'toggle-done': ui.showDone = ui.showDone || {}; ui.showDone[d.tid] = !ui.showDone[d.tid]; render(); break;
     case 'toggle-particles': LS.set('motion', !LS.get('motion', true)); render(); break;
     case 'sync': flush(); break;
@@ -1355,6 +1605,14 @@ document.addEventListener('click', e => {
       ed.weekdays = w.sort().join(','); renderEditor(); break;
     }
     case 'ed-save': saveEditor(); break;
+    case 'ed-dup': if (ed) {
+      // opens an unsaved copy (with any unsaved edits) as a new task, ready to tweak
+      const src = clone(ed); const wasAdv = ed._adv;
+      Object.keys(src).forEach(k => { if (k[0] === '_') delete src[k]; });
+      ed = Object.assign(src, { id: uid(), _new: true, _orig: null, _picker: false, _adv: wasAdv, _pin: false, _mode: 'series', _key: null });
+      delete ed.updatedAt; delete ed.deleted;
+      renderEditor(); toast(`${icon('copy')}Copy of <b>${esc(src.name)}</b>: change anything, then Save`);
+    } break;
     case 'ed-adv': if (ed) { ed._adv = !ed._adv; ui.edAdv = ed._adv; renderEditor(); } break;
     case 'cat-pick': {
       if (!ed) break;
@@ -1368,15 +1626,16 @@ document.addEventListener('click', e => {
       if (!confirm(`Delete “${ed.name}”${ed.repeat !== 'none' ? ' and all its future repeats' : ''}?`)) break;
       { const id = ed.id; closeOverlay(); patchTask(id, { deleted: true }); }
       break;
-    case 'set-layout': setMeta('photoLayout', d.v); openSettings(); break;
+    case 'set-layout': LS.set('photoLayout', d.v); render(); openSettings('photos'); break;
     case 'st-connect': connect(document.getElementById('set-url').value, document.getElementById('set-key').value); break;
     case 'st-disconnect':
       if (!confirm('Disconnect this device? Your tasks stay in the Google Sheet.')) break;
-      config = { url: '', key: '' }; LS.set('config', config); outbox = []; save(); setSync('local'); openSettings(); break;
+      config = { url: '', key: '' }; LS.set('config', config); outbox = []; save(); setSync('local'); openSettings('sync'); break;
     case 'st-copy':
       (navigator.clipboard ? navigator.clipboard.writeText(d.link) : Promise.reject()).then(
         () => { el.innerHTML = icon('check') + 'Copied'; }, () => prompt('Copy this link:', d.link)); break;
     case 'st-test': commit({ t: 'testNotify' }, false); el.innerHTML = icon('check') + 'Sent – check ntfy'; break;
+    case 'st-fix-reminders': commit({ t: 'fixReminders' }, false); el.outerHTML = '<span>Turning it on…</span>'; setTimeout(() => { if (overlay().innerHTML) openSettings('reminders'); }, 4000); break;
     case 'st-export': {
       const blob = new Blob([JSON.stringify(S, null, 2)], { type: 'application/json' });
       const a2 = document.createElement('a'); a2.href = URL.createObjectURL(blob); a2.download = `chores-backup-${ui.today}.json`; a2.click();
@@ -1401,6 +1660,8 @@ document.addEventListener('input', e => {
 document.addEventListener('change', e => {
   const t = e.target;
   if (t.id === 'set-title' && t.value.trim()) setMeta('title', t.value.trim());
+  if (t.id === 'photo-set') { ui.photoSet = t.value; openSettings('photos'); }
+  if (t.id === 'photo-upload' && t.files && t.files.length) uploadPhotos([...t.files], ui.photoSet || (activeTheme().holiday || MONTHS[activeTheme().monthIdx].key));
   if (t.id === 'set-holidays') setMeta('holidays', t.checked);
   if (t.id === 'set-shield-max') { const v = intOr(t.value, 3, 0, 10); t.value = v; setMeta('shieldMax', v); }
   if (t.id === 'set-shield-every') { const v = intOr(t.value, 6, 1, 99); t.value = v; setMeta('shieldEvery', v); }
@@ -1480,7 +1741,7 @@ document.addEventListener('touchstart', e => {
   isw = { row, x: e.touches[0].clientX, y: e.touches[0].clientY, dx: 0, on: false, open: row.classList.contains('open') };
 }, { passive: true });
 document.addEventListener('touchmove', e => {
-  if (!isw) return;
+  if (!isw || ld) return;
   const dx = e.touches[0].clientX - isw.x, dy = e.touches[0].clientY - isw.y;
   if (!isw.on) { if (Math.abs(dy) > 10 && Math.abs(dy) > Math.abs(dx)) { isw = null; return; } if (Math.abs(dx) > 10) { isw.on = true; isw.row.classList.add('dragging'); closeSwipes(isw.row); } }
   if (isw.on) { isw.dx = dx; const x = Math.max(-72, Math.min(0, (isw.open ? -56 : 0) + dx)); isw.row.style.setProperty('--sx', x + 'px'); }
@@ -1492,6 +1753,53 @@ document.addEventListener('touchend', () => {
   if (on) { const o = open ? dx < 30 : dx < -40; row.classList.toggle('open', o); ui.openRow = o ? row.dataset.row : null; }
 }, { passive: true });
 
+/* Long-press and drag to reorder: tasks with no time on the same day (the order is kept
+   for every repeat), and checklist items. Holding still ~0.45 s starts it, so scrolling
+   and tapping work as usual. */
+let ld = null, ldTimer = 0, ldBlockClick = 0;
+const LD_SEL = '.row[data-group], .item.swipe[data-group]';
+const ldMembers = el => [...el.parentElement.querySelectorAll(`:scope > [data-group="${el.dataset.group}"]`)];
+function ldArm(target, x, y) {
+  clearTimeout(ldTimer);
+  const el = target.closest(LD_SEL);
+  if (!el || (target.matches('textarea, input') && target === document.activeElement)) return;
+  if (ldMembers(el).length < 2) return;
+  ldTimer = setTimeout(() => {
+    ld = { el, y }; isw = null; sw0 = null;
+    el.classList.add('ldrag'); document.body.classList.add('ldragging');
+    if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
+    try { getSelection().removeAllRanges(); } catch (e) {}
+    if (navigator.vibrate) try { navigator.vibrate(12); } catch (e) {}
+  }, 450);
+  ldArm.x = x; ldArm.y = y;
+}
+function ldMove(x, y) {
+  if (!ld) { if (Math.hypot(x - ldArm.x, y - ldArm.y) > 8) clearTimeout(ldTimer); return false; }
+  const others = ldMembers(ld.el).filter(r => r !== ld.el);
+  const after = others.find(r => { const b = r.getBoundingClientRect(); return y < b.top + b.height / 2; });
+  if (after) { if (after !== ld.el.nextElementSibling) ld.el.parentElement.insertBefore(ld.el, after); }
+  else { const last = others[others.length - 1]; if (last && last.nextElementSibling !== ld.el) last.after(ld.el); }
+  return true;
+}
+function ldEnd() {
+  clearTimeout(ldTimer);
+  if (!ld) return;
+  const el = ld.el, ids = ldMembers(el); ld = null; ldBlockClick = Date.now();
+  el.classList.remove('ldrag'); document.body.classList.remove('ldragging');
+  if (el.matches('.item')) ids.forEach((r, i) => { const it = S.items[r.dataset.row]; if (it && it.sort !== (i + 1) * 10) patchItem(it.id, { sort: (i + 1) * 10 }, false); });
+  else ids.forEach((r, i) => { const t = S.tasks[r.dataset.task]; if (t && rankOf(t) !== (i + 1) * 10) patchTask(t.id, { rank: (i + 1) * 10 }, false); });
+  render();
+}
+document.addEventListener('touchstart', e => { if (e.touches.length === 1) ldArm(e.target, e.touches[0].clientX, e.touches[0].clientY); else clearTimeout(ldTimer); }, { passive: true });
+document.addEventListener('touchmove', e => { if (ldMove(e.touches[0].clientX, e.touches[0].clientY)) e.preventDefault(); }, { passive: false });
+document.addEventListener('touchend', ldEnd); document.addEventListener('touchcancel', ldEnd);
+document.addEventListener('pointerdown', e => { if (e.pointerType === 'mouse' && e.button === 0) ldArm(e.target, e.clientX, e.clientY); });
+document.addEventListener('pointermove', e => { if (e.pointerType === 'mouse') ldMove(e.clientX, e.clientY); });
+document.addEventListener('pointerup', e => { if (e.pointerType === 'mouse') ldEnd(); });
+// the release after a drag shouldn't also count as a tap
+document.addEventListener('click', e => { if (Date.now() - ldBlockClick < 400) { e.stopPropagation(); e.preventDefault(); } }, true);
+document.addEventListener('contextmenu', e => { if (ld || e.target.closest(LD_SEL)) e.preventDefault(); });
+
 /* refresh when coming back to the app, at midnight, and periodically */
 function tick() {
   const t = todayStr();
@@ -1500,8 +1808,8 @@ function tick() {
 document.addEventListener('visibilitychange', () => { if (!document.hidden) { tick(); pull(); } });
 window.addEventListener('focus', () => { tick(); pull(); });
 window.addEventListener('online', () => flush());
-let wasWide = isWide();
-window.addEventListener('resize', () => { const w = isWide(); if (w !== wasWide) { wasWide = w; render(); } });
+let wasWide = isWide(), wasLap = isLap();
+window.addEventListener('resize', () => { const w = isWide(), l = isLap(); if (w !== wasWide || l !== wasLap) { wasWide = w; wasLap = l; render(); } else if (l) fitLapChart(); });
 
 /* drag to reorder tag views in Settings */
 let drag = null;

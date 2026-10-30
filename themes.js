@@ -22,25 +22,25 @@ const THEMES = {
     label: 'Fall', icon: 'fa:leaf', cats: ['#e8892f', '#d9b23a', '#c95a3c', '#8fae4a', '#b8783a', '#d97a9a', '#6f9fc0', '#a98bd0'],
     vars: { bg: '#191715', surface: '#211e1b', surface2: '#2a2622', border: '#37322c', text: '#ede6dc', muted: '#a0968a',
             accent: '#d97b2f', h1: '#5b3a24', h2: '#5a4a20', h3: '#3f4a2b', h4: '#4d2c2a' },
-    status: { not_started: '#837a71', p25: '#d9772b', p50: '#d9b23a', p75: '#a6b83f', done: '#5f9e4f', not_needed: '#5b8fb8' }
+    status: { not_started: '#837a71', p25: '#d9772b', p50: '#d9b23a', p75: '#a6b83f', done: '#5f9e4f', not_needed: '#5b8fb8', missed: '#8a5f5a' }
   },
   winter: {
     label: 'Winter', icon: 'fa:snowflake', cats: ['#8cc0e8', '#a79be0', '#6fc6b8', '#e8a0b8', '#e6c75a', '#e0904a', '#9ccf7a', '#c7d3e0'],
     vars: { bg: '#12161b', surface: '#1a2028', surface2: '#212934', border: '#2c3642', text: '#e6edf3', muted: '#8b98a8',
             accent: '#8cc0e8', h1: '#24405a', h2: '#3b3355', h3: '#23474a', h4: '#2e3f55' },
-    status: { not_started: '#7b8592', p25: '#e0904a', p50: '#e6c75a', p75: '#b3c95d', done: '#6fb38a', not_needed: '#6f9fd8' }
+    status: { not_started: '#7b8592', p25: '#e0904a', p50: '#e6c75a', p75: '#b3c95d', done: '#6fb38a', not_needed: '#6f9fd8', missed: '#8a5f5a' }
   },
   spring: {
     label: 'Spring', icon: 'fa:seedling', cats: ['#e88fb0', '#8fca72', '#e8c45a', '#9ab0f0', '#c49be6', '#f0a070', '#6fc4c0', '#d8e07a'],
     vars: { bg: '#171916', surface: '#1f221e', surface2: '#272b26', border: '#343a32', text: '#eef1ea', muted: '#9ba395',
             accent: '#e88fb0', h1: '#5a3346', h2: '#3d5232', h3: '#574a2c', h4: '#36405a' },
-    status: { not_started: '#858a80', p25: '#ec9a5c', p50: '#ebcf68', p75: '#b5d36a', done: '#6dbb6a', not_needed: '#79a7e0' }
+    status: { not_started: '#858a80', p25: '#ec9a5c', p50: '#ebcf68', p75: '#b5d36a', done: '#6dbb6a', not_needed: '#79a7e0', missed: '#8a5f5a' }
   },
   summer: {
     label: 'Summer', icon: 'fa:sun', cats: ['#f2b94b', '#4fc1b8', '#f0805a', '#7fc45a', '#5aa0e8', '#e87aa0', '#c89be0', '#e8d85a'],
     vars: { bg: '#121817', surface: '#19211f', surface2: '#202a28', border: '#2b3735', text: '#e9f2ef', muted: '#8fa39e',
             accent: '#f2b94b', h1: '#1f4a48', h2: '#5a4a1c', h3: '#22475a', h4: '#5a3324' },
-    status: { not_started: '#7f8c89', p25: '#f08c3c', p50: '#f2c94c', p75: '#b8d04f', done: '#4fb37e', not_needed: '#4f9ad8' }
+    status: { not_started: '#7f8c89', p25: '#f08c3c', p50: '#f2c94c', p75: '#b8d04f', done: '#4fb37e', not_needed: '#4f9ad8', missed: '#8a5f5a' }
   }
 };
 
@@ -50,7 +50,8 @@ const STATUSES = [
   { id: 'p50', label: '50%' },
   { id: 'p75', label: '75%' },
   { id: 'done', label: 'Done' },
-  { id: 'not_needed', label: 'Not needed' }
+  { id: 'not_needed', label: 'Not needed' },
+  { id: 'missed', label: 'Missed' }
 ];
 
 const HOLIDAYS = {
@@ -132,11 +133,15 @@ function cycleOrder(key, n, cycle) {
   }
   return p;
 }
+// Photos taken out of the rotation (Settings → Photos); set by app.js from the synced settings.
+let HIDDEN_PHOTOS = [], CUSTOM_PHOTOS = {}; // photos you added (saved in your Google Drive)
+const photoFile = e => typeof e === 'string' ? e : e.file;
+const shownPhotos = k => [...((BANNERS || {})[k] || []), ...(CUSTOM_PHOTOS[k] || [])].filter(e => !HIDDEN_PHOTOS.includes(photoFile(e)));
 function rawPick(ds, season, holiday, rotDs) {
-  const B = BANNERS || {}, month = MONTH_KEYS[+ds.slice(5, 7) - 1];
-  const key = [holiday, month, season].find(k => k && B[k] && B[k].length);
+  const month = MONTH_KEYS[+ds.slice(5, 7) - 1];
+  const key = [holiday, month, season].find(k => k && shownPhotos(k).length);
   if (!key) return null;
-  const list = B[key].map(e => typeof e === 'string' ? { file: e } : e), n = list.length;
+  const list = shownPhotos(key).map(e => typeof e === 'string' ? { file: e } : e), n = list.length;
   // Cycles start on the 1st of the month, or on the first day of a holiday window.
   let anchor = rotDs.slice(0, 8) + '01', idx, seedKey;
   if (key === holiday && typeof holidayFor === 'function') {
@@ -166,7 +171,7 @@ function bannerFor(ds, season, holiday, rotDs = ds) {
     if (prev && prev.key !== r.key && samePhoto(prev.e, e)) e = r.list[r.order[(r.pos + 1) % r.list.length]];
   }
   const url = /^https?:/.test(e.file) ? e.file : 'banners/' + e.file;
-  return { url, focus: e.focus || 'center', phoneFocus: e.phoneFocus || e.focus || 'center', accent: e.accent || null,
+  return { url, file: e.file, focus: e.focus || 'center', phoneFocus: e.phoneFocus || e.focus || 'center', accent: e.accent || null,
            layout: e.layout || null, w: e.w, h: e.h, cl: e.cl || null, credit: e.credit || '' };
 }
 

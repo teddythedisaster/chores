@@ -135,7 +135,7 @@ const setMeta = (key, value) => commit({ t: 'meta', key, value, updatedAt: Date.
 
 /* ================= sync with Apps Script ================= */
 let flushTimer = null, inflight = false, retryMs = 4000;
-const BACKEND_VERSION = 8; // matches VERSION in Code.gs
+const BACKEND_VERSION = 9; // matches VERSION in Code.gs
 function scheduleFlush(ms = 350) { clearTimeout(flushTimer); flushTimer = setTimeout(flush, ms); }
 function setSync(s, msg = '') { ui.sync = s; ui.syncMsg = msg; const el = document.getElementById('sync'); if (el) el.outerHTML = syncBadge(); }
 
@@ -150,6 +150,7 @@ async function flush() {
     const data = await res.json();
     if (!data.ok) throw new Error(data.error || 'server error');
     outbox.splice(0, batch.length);
+    (data.notes || []).forEach(n => { if (/^ntfy/.test(n)) toast(`${icon('bell-ring')}${/200/.test(n) ? 'Test sent to ntfy' : 'Test failed: ' + esc(n.replace(/^ntfy error: /, ''))}`); });
     loadServerState(data.state);
     retryMs = 4000; setSync('ok');
   } catch (e) {
@@ -370,9 +371,13 @@ function graceDots(n, max = 3) {
   return Array.from({ length: max }, (_, i) => `<span class="gd${i < n ? ' on' : ''}" title="Shield">${solid('fa:shield-halved')}</span>`).join('');
 }
 function histDots(h) {
-  return h.slice(-14).map(x => `<span class="hd hd-${x.kind}" title="${fmtShort(x.date)}: ${{ done: 'Done', earn: 'Done · earned a shield', partial: 'Partly done', pause: 'Not needed (paused)', grace: 'Missed · shield used', miss: 'Missed', today: 'Today' }[x.kind]}"></span>`).join('');
+  // (a Done that earned a shield looks like any other Done)
+  return h.slice(-14).map(x => `<span class="hd hd-${x.kind === 'earn' ? 'done' : x.kind}" title="${fmtShort(x.date)}: ${{ done: 'Done', earn: 'Done', partial: 'Partly done', pause: 'Not needed (paused)', grace: 'Missed · shield used', miss: 'Missed', today: 'Today' }[x.kind]}"></span>`).join('');
 }
 const pinned = () => (metaVal('pinnedStreaks', []) || []).filter(id => S.tasks[id] && S.tasks[id].streak);
+// Section descriptions (Settings → Look & theme): left out entirely when turned off.
+const hintsOn = () => metaVal('hints', true) !== false;
+const hint = (html, cls = '') => hintsOn() ? `<div class="hint${cls ? ' ' + cls : ''}">${html}</div>` : '';
 function streaksHTML(pred = () => true, onlyIds = null) {
   let ts = taskList().filter(t => t.streak && t.repeat && t.repeat !== 'none' && pred(t));
   if (onlyIds) ts = onlyIds.map(id => ts.find(t => t.id === id)).filter(Boolean);
@@ -385,11 +390,11 @@ function streaksHTML(pred = () => true, onlyIds = null) {
         <span class="ntext"><span class="nm">${esc(t.name)}</span><span class="meta">${esc(repeatText(t))}</span></span>
         ${!onlyIds && pins.includes(t.id) ? `<span class="pinned" title="Pinned to Overview">${solid('fa:thumbtack')}</span>` : ''}
         <span class="sc-count${i.cur ? '' : ' zero'}">${solid('fa:fire-flame-curved')}${i.cur}</span></span>
-      ${!i.goal && !onlyIds ? `<span class="sc-nogoal">No goal yet · tap to set one</span>` : ''}
+      ${!i.goal && !onlyIds && hintsOn() ? `<span class="sc-nogoal">No goal yet · tap to set one</span>` : ''}
       ${i.goal ? `<span class="sc-goal"><span class="bar"><span style="width:${pct}%"></span></span><span class="gl">${i.cur >= i.goal ? solid('fa:trophy') + ' Goal reached' : i.cur + ' / ' + i.goal}</span></span>` : ''}
       <span class="sc-bottom"><span class="hds">${histDots(i.hist)}</span><span class="gds">${graceDots(i.graces, i.max)}</span></span>
     </button>`; }).join('')}</div>
-    ${onlyIds ? '' : `<div class="hint streak-key">${solid('fa:shield-halved', 'inline')} shields: earn one for every ${shieldEveryDefault()} done in a row (save up to ${shieldMaxDefault()}); a missed day uses one instead of breaking the streak. Change this per task under More options, or for all tasks in Settings.</div>`}`;
+    ${onlyIds ? '' : hint(`${solid('fa:shield-halved', 'inline')} shields: earn one for every ${shieldEveryDefault()} done in a row (save up to ${shieldMaxDefault()}); a missed day uses one instead of breaking the streak. Change this per task under More options, or for all tasks in Settings.`, 'streak-key')}`;
 }
 function historyOf(t, count = 14) {
   const out = [];
@@ -514,18 +519,22 @@ function rowHTML(it, mode) {
 function tableHTML(items, mode, emptyMsg, view, tid) {
   const catAttr = view && view.cats && view.cats[0] ? ` data-cat="${esc(view.cats[0])}"` : '';
   tid = tid || ui.tab + '-' + mode;
-  const showDone = !!(ui.showDone || {})[tid];
+  const showDone = !!(LS.get('showDone', {}) || {})[tid];
   const open = items.filter(it => !FINISHED[stOf(it)]), fin = items.length - open.length;
   const shown = showDone ? items : open;
+  // "Can get ahead on" folds away (remembered on this device)
+  const folded = !!LS.get('earlyFolded', false), nEarly = shown.filter(it => it.early).length;
+  const earlyHead = `<button class="early-div" data-act="fold-early" aria-expanded="${!folded}">${icon('sparkles')}Can get ahead on<span class="ed-n">${nEarly}</span>${icon(folded ? 'chevron-down' : 'chevron-up')}</button>`;
+  const rows = shown.map((it, i) => (it.early && !(shown[i - 1] || {}).early ? earlyHead : '') + (it.early && folded ? '' : rowHTML(it, mode))).join('');
   return `<div class="table">
     <div class="thead"><span>${icon('loader-circle')}Status</span><span>${icon('list-todo')}Task name</span><span>${icon('calendar')}Due</span></div>
-    ${shown.length ? shown.map((it, i) => (it.early && !(shown[i - 1] || {}).early ? `<div class="early-div">${icon('sparkles')}Can get ahead on</div>` : '') + rowHTML(it, mode)).join('') : `<div class="empty">${fin ? 'All done here' : emptyMsg}</div>`}
+    ${shown.length ? rows : `<div class="empty">${fin ? 'All done here' : emptyMsg}</div>`}
     ${fin ? `<button class="showdone" data-act="toggle-done" data-tid="${tid}">${icon('check')}${fin} finished · ${showDone ? 'Hide' : 'Show'}</button>` : ''}
     <button class="newrow" data-act="new-task"${catAttr}${mode === 'week' ? ` data-date="${Rec.addDays(ui.today, 1)}"` : mode === 'anytime' ? ' data-undated="1"' : ''}>${icon('plus')}New task</button>
   </div>`;
 }
 
-function pieHTML(items, label, single = false) {
+function pieHTML(items, label, single = false, kind = '') {
   const counts = {}; STATUSES.forEach(s => counts[s.id] = 0);
   items.forEach(it => counts[stOf(it)]++);
   const total = items.length, R = 52, C = 2 * Math.PI * R;
@@ -534,7 +543,7 @@ function pieHTML(items, label, single = false) {
     const n = counts[s.id]; if (!n) return;
     const len = n / total * C;
     const gap = Object.values(counts).filter(Boolean).length > 1 ? 1.5 : 0;
-    arcs += `<circle r="${R}" cx="70" cy="70" fill="none" stroke="var(--st-${s.id})" stroke-width="20"
+    arcs += `<circle r="${R}" cx="70" cy="70" fill="none" stroke="var(--st-${s.id})" stroke-width="20"${kind ? ` data-act="cv-open" data-kind="${kind}" data-st="${s.id}"` : ''}
       stroke-dasharray="${Math.max(len - gap, 0.1)} ${C}" stroke-dashoffset="${-off}" transform="rotate(-90 70 70)"><title>${s.label}: ${n}</title></circle>`;
     off += len;
   });
@@ -543,9 +552,9 @@ function pieHTML(items, label, single = false) {
     `<li><span class="dot" style="background:var(--st-${s.id})"></span>${s.label}<b>${counts[s.id]}</b></li>`).join('');
   if (single) {
     const BAR = ['done', 'not_needed', 'p75', 'p50', 'p25', 'not_started'].map(id => STATUSES.find(s => s.id === id));
-    const segs = BAR.filter(s => counts[s.id]).map(s => `<span style="flex:${counts[s.id]};background:var(--st-${s.id})" title="${s.label}: ${counts[s.id]}"></span>`).join('');
+    const segs = BAR.filter(s => counts[s.id]).map(s => `<span style="flex:${counts[s.id]};background:var(--st-${s.id})" title="${s.label}: ${counts[s.id]}"${kind ? ` data-act="cv-open" data-kind="${kind}" data-st="${s.id}"` : ''}></span>`).join('');
     const mini = BAR.filter(s => counts[s.id]).map(s => `<span><i style="background:var(--st-${s.id})"></i>${counts[s.id]} ${s.label.toLowerCase()}</span>`).join('');
-    return `<div class="card chart big">
+    return `<div class="card chart big${kind ? ' clickable' : ''}"${kind ? ` data-act="cv-open" data-kind="${kind}"` : ''}>
       <div class="card-label">${icon('chart-pie')}${label}<b class="cl-total">${total} ${total === 1 ? 'task' : 'tasks'}</b></div>
       <div class="chart-body"><svg viewBox="0 0 140 140" class="pie">${arcs}
         <text x="70" y="${total ? 77 : 75}" text-anchor="middle" class="pie-big">${total || '—'}</text>
@@ -553,7 +562,7 @@ function pieHTML(items, label, single = false) {
       <div class="hbar-wrap"><div class="hbar">${segs || '<span style="flex:1;background:var(--border)"></span>'}</div><div class="hbar-legend">${mini || '<span>Nothing scheduled</span>'}</div></div>
     </div>`;
   }
-  return `<div class="card chart">
+  return `<div class="card chart${kind ? ' clickable' : ''}"${kind ? ` data-act="cv-open" data-kind="${kind}"` : ''}>
     <div class="card-label">${icon('chart-pie')}${label}</div>
     <div class="chart-body">
       <svg viewBox="0 0 140 140" class="pie">${arcs}
@@ -609,7 +618,7 @@ function listCardHTML(l, k, cls = 'block', opts = {}) {
   const items = Object.values(S.items).filter(i => i.listId === l.id).sort((a, b) => (a.checked - b.checked) || (a.sort - b.sort));
   // long lists tuck checked items away (tap to show them)
   const nChecked = items.filter(i => i.checked).length, long = items.length > 8;
-  const showChecked = !long || !!(ui.showChecked || {})[l.id];
+  const showChecked = !long || !!(LS.get('showChecked', {}) || {})[l.id];
   const extra = i => l.id === '__notes' ? `<button class="iconbtn faint" data-act="note-to-task" data-item="${i.id}" title="Make it a task" aria-label="Make it a task">${icon('calendar-plus')}</button>` : '';
   const rows = items.filter(i => showChecked || !i.checked).map(i => itemRowHTML(i, extra(i))).join('');
   const left = items.filter(i => !i.checked).length, onHome = homeLists().includes(l.id);
@@ -625,13 +634,43 @@ function listCardHTML(l, k, cls = 'block', opts = {}) {
 const NOTES_LIST = { id: '__notes', name: 'Today’s Notes' };
 const homeLists = () => { const v = metaVal('homeLists', null); if (Array.isArray(v)) return v; const l = metaVal('lists', []); return l.length ? [l[0].id] : []; };
 
+// Rename / delete a list (or create one when id is null).
+function openListSheet(id, back = false) {
+  const l = id ? metaVal('lists', []).find(x => x.id === id) : null;
+  overlay().className = 'on sheet-mode';
+  overlay().innerHTML = `<div class="scrim" data-act="close"></div>
+  <div class="sheet small-sheet" role="dialog" aria-label="${l ? 'Edit list' : 'New list'}">
+    <div class="sheet-head">${back ? `<button class="iconbtn" data-act="lists-manage" aria-label="Back">${icon('chevron-left')}</button>` : ''}<b>${l ? 'Edit list' : 'New list'}</b><span class="spacer"></span><button class="iconbtn" data-act="close" aria-label="Close">${icon('x')}</button></div>
+    <div class="sheet-body"><div class="field"><label>Name</label><input id="ls-name" value="${esc(l ? l.name : '')}" placeholder="e.g. Hardware store" autocapitalize="words" enterkeyhint="done"></div></div>
+    <div class="sheet-foot">${l ? `<button class="btn danger" data-act="ls-delete" data-list="${l.id}"${back ? ' data-back="1"' : ''}>${icon('trash-2')}Delete list</button>` : ''}<span class="spacer"></span>
+      <button class="btn" data-act="close">Cancel</button><button class="btn primary" data-act="ls-save" data-list="${l ? l.id : ''}"${back ? ' data-back="1"' : ''}>${l ? 'Save' : 'Create'}</button></div></div>`;
+  setTimeout(() => { const n = document.getElementById('ls-name'); if (n) { n.focus(); n.select(); } }, 60);
+}
+// All lists: drag to reorder, show/hide on this device, rename or delete.
+function openListsManager() {
+  const lists = metaVal('lists', []), hidden = LS.get('listsHidden', []);
+  overlay().className = 'on sheet-mode';
+  overlay().innerHTML = `<div class="scrim" data-act="close"></div>
+  <div class="sheet" role="dialog" aria-label="Your lists">
+    <div class="sheet-head"><b>Your lists</b><span class="spacer"></span><button class="iconbtn" data-act="close" aria-label="Close">${icon('x')}</button></div>
+    <div class="sheet-body">
+      <div class="btnrow"><button class="btn" data-act="lm-all" data-v="show">${icon('eye')}Show all</button><button class="btn" data-act="lm-all" data-v="hide">${icon('eye-off')}Hide all</button></div>
+      <span class="muted small">Drag ${solid('fa:grip-vertical', 'inline')} to reorder. Showing or hiding a list only affects this device.</span>
+      <div id="list-rows" data-reorder="lists">${lists.map((l, i) => { const on = !hidden.includes(l.id), n = Object.values(S.items).filter(x => x.listId === l.id && !x.checked).length;
+        return `<div class="view-row lm-row${on ? '' : ' off'}" data-i="${i}"><span class="grip" aria-label="Drag to reorder">${solid('fa:grip-vertical')}</span>
+          <button class="lm-name" data-act="lm-toggle" data-list="${l.id}" aria-pressed="${on}">${icon(on ? 'eye' : 'eye-off')}<span>${esc(l.name)}</span><span class="muted small">${n}</span></button>
+          <button class="iconbtn faint" data-act="lm-edit" data-list="${l.id}" aria-label="Rename or delete">${icon('pencil')}</button></div>`; }).join('') || '<div class="muted small">No lists yet.</div>'}</div>
+      <div class="btnrow"><button class="btn" data-act="lm-new">${icon('plus')}New list</button></div>
+    </div></div>`;
+}
+
 // Lists: chips at the top show/hide each list (this device only); every visible list
 // gets its own titled section on the page.
 function listsHTML(inBlock = false, intro = '') {
   const lists = metaVal('lists', []);
   if (!lists.length) return `<div class="empty">No lists yet.<br><button class="chip" data-act="list-add">${icon('list-plus')}Create a list</button></div>`;
   const hidden = LS.get('listsHidden', []);
-  const chips = `<div class="filters list-chips">${lists.map(l => { const on = !hidden.includes(l.id);
+  const chips = `<div class="filters list-chips"><button class="chip lm-btn" data-act="lists-manage" aria-label="All lists" title="All lists">${icon('sliders-horizontal')}</button>${lists.map(l => { const on = !hidden.includes(l.id);
       return `<button class="chip${on ? ' on' : ''}" data-act="list-toggle" data-list="${l.id}" aria-pressed="${on}">${esc(l.name)}</button>`; }).join('')}
     <button class="chip add-list" data-act="list-add" aria-label="New list" title="New list">${icon('plus')}</button></div>`;
   const sections = lists.map((l, k) => hidden.includes(l.id) ? '' : listCardHTML(l, k, inBlock ? 'list-sec' : 'block')).join('');
@@ -656,7 +695,8 @@ const views = () => metaVal('views', DEFAULT_VIEWS) || DEFAULT_VIEWS;
 const isWide = () => innerWidth >= 760;
 // Laptop layout (Notion-style Home + Lists) for windows at least this wide; phones keep their tabs.
 const LAP_MIN = 700;
-const isLap = () => innerWidth >= LAP_MIN;
+// (a phone turned sideways is wide but short, so it keeps the phone layout)
+const isLap = () => innerWidth >= LAP_MIN && innerHeight >= 520;
 function viewIcon(v, cls = '') {
   if (v.iconData) { const k = v.iconData.indexOf('|'); return svgPath(v.iconData.slice(0, k), v.iconData.slice(k + 1), cls); }
   return solid(v.icon || 'fa:tags', cls);
@@ -700,6 +740,7 @@ function renderLap({ top, title, banner, y }) {
   </main>`;
   fitTextareas();
   fitLapChart();
+  renderChartView();
   const key = 'lap-' + tab;
   if (ui.lastTab !== key) { ui.lastTab = key; window.scrollTo(0, 0); } else window.scrollTo(0, y);
 }
@@ -707,20 +748,21 @@ function renderLap({ top, title, banner, y }) {
 function lapChartHTML(tI, wI) {
   const parts = items => { const c = {}; STATUSES.forEach(s => c[s.id] = 0); items.forEach(it => c[stOf(it)]++); return c; };
   const ORDER = ['done', 'not_needed', 'p75', 'p50', 'p25', 'not_started', 'missed'];
-  const one = (label, items, size) => {
+  const one = (label, items, kind) => {
+    const act = st => ` data-act="cv-open" data-kind="${kind}"${st ? ` data-st="${st}"` : ''}`;
     const c = parts(items), total = items.length, done = c.done + c.not_needed;
     const R = 44, C = 2 * Math.PI * R; let off = 0, arcs = '';
     if (total) ORDER.forEach(id => { const n = c[id]; if (!n) return; const L = n / total * C;
-      arcs += `<circle r="${R}" cx="56" cy="56" fill="none" stroke="var(--st-${id})" stroke-width="13" stroke-dasharray="${Math.max(L - 1.5, .1)} ${C}" stroke-dashoffset="${-off}" transform="rotate(-90 56 56)"/>`; off += L; });
+      arcs += `<circle r="${R}" cx="56" cy="56" fill="none" stroke="var(--st-${id})" stroke-width="13"${act(id)} stroke-dasharray="${Math.max(L - 1.5, .1)} ${C}" stroke-dashoffset="${-off}" transform="rotate(-90 56 56)"/>`; off += L; });
     else arcs = `<circle r="${R}" cx="56" cy="56" fill="none" stroke="var(--border)" stroke-width="13"/>`;
     const legend = ORDER.filter(id => c[id]).map(id => `<span><i style="background:var(--st-${id})"></i>${c[id]} ${statusLabel(id).toLowerCase()}</span>`).join('') || '<span>Nothing scheduled</span>';
-    const segs = ORDER.filter(id => c[id]).map(id => `<span style="flex:${c[id]};background:var(--st-${id})" title="${statusLabel(id)}: ${c[id]}"></span>`).join('') || '<span style="flex:1;background:var(--border)"></span>';
-    return { ring: `<div class="lc-ring"><svg viewBox="0 0 112 112"><g>${arcs}</g><text x="56" y="56" text-anchor="middle" class="rn">${total ? done + '/' + total : '—'}</text><text x="56" y="72" text-anchor="middle" class="rs">${total ? 'done' : 'no tasks'}</text></svg>
+    const segs = ORDER.filter(id => c[id]).map(id => `<span style="flex:${c[id]};background:var(--st-${id})" title="${statusLabel(id)}: ${c[id]}"${act(id)}></span>`).join('') || '<span style="flex:1;background:var(--border)"></span>';
+    return { ring: `<div class="lc-ring clickable"${act()}><svg viewBox="0 0 112 112"><g>${arcs}</g><text x="56" y="56" text-anchor="middle" class="rn">${total ? done + '/' + total : '—'}</text><text x="56" y="72" text-anchor="middle" class="rs">${total ? 'done' : 'no tasks'}</text></svg>
         <div class="lc-name">${label}</div><div class="lc-leg">${legend}</div></div>`,
-      bar: `<div class="lc-bar"><div class="lc-top"><span class="lc-name">${label}</span><span class="lc-num"><b>${done}</b>/${total} done</span></div>
+      bar: `<div class="lc-bar clickable"${act()}><div class="lc-top"><span class="lc-name">${label}</span><span class="lc-num"><b>${done}</b>/${total} done</span></div>
         <div class="lc-seg">${segs}</div><div class="lc-leg">${legend}</div></div>` };
   };
-  const a = one('Today', tI), b = one('This week · doable now', wI);
+  const a = one('Today', tI, 'today'), b = one('This week · doable now', wI, 'week');
   return `<div class="card lchart"><div class="card-label">${icon('chart-pie')}To-do Progress</div>
     <div class="lc-rings">${a.ring}${b.ring}</div><div class="lc-bars">${a.bar}${b.bar}</div></div>`;
 }
@@ -759,14 +801,19 @@ function lapHomeHTML() {
       </div></section>
     <section class="lh-r2">
       <div class="block"><h2 class="hblock h1">Today’s To-do</h2>${tableHTML(tI, 'today', 'All clear for today')}</div>
-      <div class="block"><h2 class="hblock h2">This Week’s To-do</h2><div class="hint">${WEEK_HINT}</div>${tableHTML(wI, 'week', 'Nothing else this week')}</div>
+      <div class="block"><h2 class="hblock h2">This Week’s To-do</h2>${hint(`${WEEK_HINT}`)}${tableHTML(wI, 'week', 'Nothing else this week')}</div>
     </section>
     <section class="block lh-cal"><h2 class="hblock h3">This Week</h2>${lapCalendarHTML()}</section>
     <section class="block lh-streaks"><h2 class="hblock h4">Pinned streaks</h2>${streaksHTML(() => true, pinned())}</section>`;
 }
 function lapListsHTML() {
-  const lists = metaVal('lists', []);
-  return `<div class="lgrid">${[...lists, NOTES_LIST].map((l, k) => listCardHTML(l, k, 'block', { pin: true })).join('')}
+  // same show/hide chips as the phone (this device only), plus Today's Notes
+  const lists = metaVal('lists', []), hidden = LS.get('listsHidden', []);
+  const chips = `<div class="filters list-chips"><button class="chip lm-btn" data-act="lists-manage" aria-label="All lists" title="All lists">${icon('sliders-horizontal')}</button>${lists.map(l => { const on = !hidden.includes(l.id);
+      return `<button class="chip${on ? ' on' : ''}" data-act="list-toggle" data-list="${l.id}" aria-pressed="${on}">${esc(l.name)}</button>`; }).join('')}</div>`;
+  const shown = lists.map((l, k) => [l, k]).filter(([l]) => !hidden.includes(l.id));
+  return `${chips}<div class="lgrid">${shown.map(([l, k]) => listCardHTML(l, k, 'block', { pin: true })).join('')}
+    ${listCardHTML(NOTES_LIST, lists.length, 'block', { pin: true })}
     <button class="block newlist" data-act="list-add">${icon('plus')}New list</button></div>`;
 }
 
@@ -810,8 +857,29 @@ function tagBar() {
     <button class="chip" data-act="settings" data-sec="views" aria-label="Edit tags">${icon('pencil')}</button></div>`;
 }
 const withTag = label => label; // the page title shows the active tag (“Today • Cleaning”)
-function stickyPie(items, label) {
-  return `<section class="chart-sticky">${pieHTML(items, label, true)}</section>`;
+/* Chart detail: tap a chart (or one of its colors) to see those tasks, grouped by status. */
+const CV_GROUPS = [['todo', 'Still to do', ['not_started', 'p25', 'p50', 'p75']], ['missed', 'Missed', ['missed']], ['done', 'Done', ['done']], ['not_needed', 'Not needed', ['not_needed']]];
+const cvGroupOf = st => (CV_GROUPS.find(g => g[2].includes(st)) || CV_GROUPS[0])[0];
+function chartViewItems(kind) { return kind === 'week' ? weekChartItems() : dueToday(todayItems(passesFilter, false)); }
+function renderChartView() {
+  let el = document.getElementById('cv');
+  if (!ui.cv) { if (el) el.remove(); document.body.classList.remove('cv-open'); return; }
+  if (!el) { el = document.createElement('div'); el.id = 'cv'; el.setAttribute('role', 'dialog'); document.body.appendChild(el); }
+  document.body.classList.add('cv-open');
+  const { kind } = ui.cv, items = chartViewItems(kind), filter = ui.cv.group || 'all';
+  const grouped = CV_GROUPS.map(([id, label, sts]) => [id, label, items.filter(it => sts.includes(stOf(it)))]);
+  const done = items.filter(it => ['done', 'not_needed'].includes(stOf(it))).length, tag = activeTag();
+  const chips = [['all', 'All', items.length], ...grouped.map(([id, l, list]) => [id, l, list.length])].filter(([id, , n]) => id === 'all' || n)
+    .map(([id, l, n]) => `<button class="chip${filter === id ? ' on' : ''}" data-act="cv-filter" data-g="${id}">${esc(l)} <b>${n}</b></button>`).join('');
+  const sections = grouped.filter(([id, , list]) => list.length && (filter === 'all' || filter === id)).map(([id, label, list], k) =>
+    `<div class="block"><h2 class="hblock ${['h1', 'h4', 'h3', 'h2'][k % 4]}">${label} <span class="lh-count">${list.length}</span></h2><div class="table">
+      ${list.map(it => rowHTML(it, kind === 'week' ? 'week' : 'today')).join('')}</div></div>`).join('');
+  el.innerHTML = `<div class="cv-head"><button class="iconbtn" data-act="cv-close" aria-label="Back">${icon('chevron-left')}</button>
+      <b>${kind === 'week' ? 'This week · doable now' : 'Today'}${tag ? ' • ' + esc(tag.name) : ''}</b><span class="muted">${done} of ${items.length} done</span></div>
+    <div class="cv-body"><div class="filters">${chips}</div>${sections || '<div class="empty">Nothing here.</div>'}</div>`;
+}
+function stickyPie(items, label, kind = '') {
+  return `<section class="chart-sticky">${pieHTML(items, label, true, kind)}</section>`;
 }
 function threeDayHTML() {
   const days = [[-1, 'Yesterday'], [0, 'Today'], [1, 'Tomorrow']];
@@ -832,14 +900,14 @@ function pageBody() {
     case 'today': {
       const tI = todayItems();
       return `${tagBar()}<div class="split">
-        <aside class="split-side">${stickyPie(dueToday(tI), withTag("Today's Progress"))}</aside>
+        <aside class="split-side">${stickyPie(dueToday(tI), withTag("Today's Progress"), 'today')}</aside>
         <div class="split-main">
         <section class="grid2">
           <div class="block"><h2 class="hblock h1">Today’s To-do</h2>${tableHTML(tI, 'today', 'All clear for today')}</div>
           <div class="block"><h2 class="hblock h3">Yesterday · Today · Tomorrow</h2>${threeDayHTML()}</div>
         </section>
         <section class="grid2">
-          <div class="block"><h2 class="hblock h4">Notes</h2><div class="hint">Small things to remember. Tap ${icon('calendar-plus', 'inline')} to make one a task.</div>${notesHTML()}</div>
+          <div class="block"><h2 class="hblock h4">Notes</h2>${hint(`Small things to remember. Tap ${icon('calendar-plus', 'inline')} to make one a task.`)}${notesHTML()}</div>
           <div class="block"><h2 class="hblock h2">Streaks</h2>${streaksHTML(passesFilter)}</div>
         </section></div></div>
         <div class="cp-spacer"></div>`;
@@ -847,10 +915,10 @@ function pageBody() {
     case 'week': {
       const wI = weekTabItems();
       return `${tagBar()}<div class="split">
-        <aside class="split-side">${stickyPie(weekChartItems(), "This week · doable now")}</aside>
+        <aside class="split-side">${stickyPie(weekChartItems(), "This week · doable now", 'week')}</aside>
         <div class="split-main">
         <section class="grid2">
-          <div class="block"><h2 class="hblock h2">This Week’s To-do</h2><div class="hint">${WEEK_TAB_HINT}</div>${tableHTML(wI, 'week', 'Nothing this week')}</div>
+          <div class="block"><h2 class="hblock h2">This Week’s To-do</h2>${hint(`${WEEK_TAB_HINT}`)}${tableHTML(wI, 'week', 'Nothing this week')}</div>
           <div class="block"><h2 class="hblock h3">Calendar</h2>${calendarHTML()}</div>
         </section></div></div>
         <div class="cp-spacer"></div>`;
@@ -859,10 +927,10 @@ function pageBody() {
     default: {
       const tI = todayItems(passesFilter, false), wI = weekItems(), und = undatedItems();
       return `${tagBar()}<div class="ov">
-        <section class="charts ov-charts">${pieHTML(dueToday(tI), withTag("Today's Progress"))}${pieHTML(weekChartItems(), withTag("Week · doable now"))}</section>
+        <section class="charts ov-charts">${pieHTML(dueToday(tI), withTag("Today's Progress"), false, 'today')}${pieHTML(weekChartItems(), withTag("Week · doable now"), false, 'week')}</section>
         <div class="block ov-today"><h2 class="hblock h1">Today’s To-do</h2>${tableHTML(tI, 'today', 'All clear for today')}</div>
-        <div class="block ov-week"><h2 class="hblock h2">This Week’s To-do</h2><div class="hint">${WEEK_HINT}</div>${tableHTML(wI, 'week', 'Nothing else this week')}</div>
-        <div class="block ov-any"><h2 class="hblock h4">Anytime</h2><div class="hint">Tasks with no date</div>${tableHTML(und, 'anytime', 'No undated tasks. Make one with <b>No date</b> in a new task.', null, 'ov-any')}</div>
+        <div class="block ov-week"><h2 class="hblock h2">This Week’s To-do</h2>${hint(`${WEEK_HINT}`)}${tableHTML(wI, 'week', 'Nothing else this week')}</div>
+        <div class="block ov-any"><h2 class="hblock h4">Anytime</h2>${hint(`Tasks with no date`)}${tableHTML(und, 'anytime', 'No undated tasks. Make one with <b>No date</b> in a new task.', null, 'ov-any')}</div>
         <div class="block ov-streaks"><h2 class="hblock h3">Pinned streaks</h2>${streaksHTML(() => true, pinned())}</div>
         ${wide ? `<div class="block ov-lists">${listsHTML(true)}</div>` : ''}
       </div>`;
@@ -914,9 +982,10 @@ function render() {
     ${pageBody()}
     ${banner && banner.credit ? `<div class="credit">Photo: ${esc(banner.credit)} on Unsplash</div>` : ''}
   </main>
-  <button class="fab" data-act="new-task" aria-label="New task">${icon('plus')}</button>
+  ${ui.tab === 'lists' ? `<button class="fab" data-act="list-add" aria-label="New list">${icon('list-plus')}</button>` : `<button class="fab" data-act="new-task" aria-label="New task">${icon('plus')}</button>`}
   ${navHTML('bottom')}`;
   fitTextareas();
+  renderChartView();
   if (ui.openRow) { const r = document.querySelector(`.item.swipe[data-row="${ui.openRow}"]`); if (r) r.classList.add('open'); }
   if (ui.lastTab !== ui.tab) { ui.lastTab = ui.tab; window.scrollTo(0, 0); } else window.scrollTo(0, y);
   updateChartShrink();
@@ -931,6 +1000,12 @@ function toast(html) {
 
 /* ================= overlays: status menu, editor, settings ================= */
 const overlay = () => document.getElementById('overlay');
+// Closing the task editor while a weekly task has no days picked: warn first (nothing is saved).
+function tryClose() {
+  if (ed && ed.repeat === 'weekly' && ed._wds && !ed._wds.length &&
+    !confirm('No days are picked for this weekly task, so these changes can’t be saved. Close anyway?')) return;
+  closeOverlay();
+}
 function closeOverlay() { overlay().innerHTML = ''; overlay().className = ''; ed = null; }
 
 function openStatusMenu(btn) {
@@ -974,7 +1049,9 @@ function setEdMode(mode) {
 
 function renderEditor() {
   const t = ed;
-  const wds = Rec.weekdaysOf(Object.assign({}, t, { start: t.start || ui.today }));
+  // the picked weekdays live in ed._wds while editing, so every day can be unticked before picking a new one
+  if (!t._wds) t._wds = Rec.weekdaysOf(Object.assign({}, t, { start: t.start || ui.today }));
+  const wds = t._wds, noDays = t.repeat === 'weekly' && !wds.length;
   const unit = { daily: 'day', weekly: 'week', monthly: 'month', yearly: 'year' }[t.repeat];
   const repeating = t.repeat && t.repeat !== 'none';
   const one = t._mode === 'one', undated = !repeating && !t.start, adv = !!t._adv;
@@ -1025,7 +1102,8 @@ function renderEditor() {
           `<button class="${(t.repeat || 'none') === r ? 'on' : ''}" data-act="ed-repeat" data-v="${r}">${r === 'none' ? 'Once' : r[0].toUpperCase() + r.slice(1)}</button>`).join('')}</div>
       ${repeating ? `<div class="field inline"><label>Every</label><input type="number" min="1" max="99" data-field="interval" value="${t.interval || 1}" class="num"><span>${unit}${(+t.interval || 1) > 1 ? 's' : ''}</span></div>` : ''}
       ${t.repeat === 'weekly' ? `<div class="field"><label>On</label><div class="wds">${[1, 2, 3, 4, 5, 6, 0].map(d =>
-        `<button class="${wds.includes(d) ? 'on' : ''}" data-act="ed-wd" data-v="${d}">${DOW[d][0]}${DOW[d][1]}</button>`).join('')}</div></div>` : ''}
+        `<button class="${wds.includes(d) ? 'on' : ''}" data-act="ed-wd" data-v="${d}">${DOW[d][0]}${DOW[d][1]}</button>`).join('')}</div>
+        ${noDays ? `<div class="wd-warn">${icon('x')}Pick at least one day</div>` : ''}</div>` : ''}
       ${t.repeat === 'monthly' ? `<div class="field inline"><label>Day of month</label><input type="number" min="1" max="31" data-field="dayOfMonth" class="num" value="${t.dayOfMonth || +t.start.slice(8)}"></div>` : ''}
       ${repeating ? `<div class="field inline"><label>Ends (optional)</label><input type="date" data-field="end" value="${t.end || ''}"></div>` : ''}</div>
       ${undated ? '' : `<div class="adv-group"><div class="adv-title">${icon('clock', 'inline')}Timing</div>
@@ -1184,6 +1262,7 @@ function saveEditor() {
   if (!t.name) { const n = document.querySelector('[data-field=name]'); n && n.focus(); return; }
   if (t._mode === 'one') return saveOneDay(t);
   if (t.repeat !== 'none' && !t.start) t.start = ui.today;
+  if (t.repeat === 'weekly' && t._wds && !t._wds.length) { renderEditor(); const w = document.querySelector('.wd-warn'); w && w.scrollIntoView({ block: 'center' }); return; }
   if (t.repeat === 'weekly' && !String(t.weekdays)) t.weekdays = String(Rec.weekday(t.start));
   if (t.repeat !== 'weekly') t.weekdays = '';
   if (t.repeat !== 'monthly') t.dayOfMonth = '';
@@ -1254,7 +1333,10 @@ function reminderStatusHTML() {
     return `<li>${tm ? `<b>${fmt12(tm)}</b>` : `<b class="warn">No time</b>`} ${esc(it.t.name)}${tm ? '' : ' <span class="muted">(won’t remind: set a time or “Remind me at”)</span>'}</li>`; }).join('');
   return `<div class="field" id="sec-reminders"><label>Reminders</label>
     <div class="rem-state">${state}</div>
+    ${r && r.lastError ? `<div class="rem-err">${icon('x')}<span><b>Last problem:</b> ${esc(r.lastError)}. It tries again on the next check.</span></div>` : ''}
     ${r && r.lastSent ? `<div class="muted small">Last reminder sent: ${esc(r.lastSent)}</div>` : ''}
+    ${r && 'token' in r ? `<div class="muted small">${r.token ? icon('check', 'inline') + ' Sending with your ntfy account' : '<b>No ntfy access token yet.</b> Without one, ntfy.sh often rejects reminders sent from Google. See “Reminders” in the setup guide.'}</div>` : ''}
+    <div class="muted small">Reminders are handed to ntfy up to 20 minutes early with their exact time, so they arrive on time even when Google’s check runs late.</div>
     <div class="muted small">Today${items.length ? ':' : ': nothing set to remind.'}</div>${rows ? `<ul class="rem-list">${rows}</ul>` : ''}
     <div class="muted small">If the test notification below doesn’t arrive, check the ntfy app is subscribed to your topic and is allowed to send notifications (on Android also set its battery use to Unrestricted).</div></div>`;
 }
@@ -1450,7 +1532,7 @@ document.addEventListener('click', e => {
   const el = e.target.closest('[data-act]'); if (!el) return;
   const a = el.dataset.act, d = el.dataset;
   switch (a) {
-    case 'close': closeOverlay(); break;
+    case 'close': tryClose(); break;
     case 'status': openStatusMenu(el); break;
     case 'set-status': {
       closeOverlay();
@@ -1469,6 +1551,9 @@ document.addEventListener('click', e => {
     case 'ed-undated': if (ed) { ed.start = el.checked ? '' : (ed._orig && ed._orig.start) || ui.today; renderEditor(); } break;
     case 'new-task': openEditor(null, { date: d.date, undated: d.undated === '1', cat: d.cat || ((activeTag() || {}).cats || [])[0] || '' }); break;
     case 'tag-filter': ui.tag = d.view || null; LS.set('tagFilter', ui.tag); render(); break;
+    case 'cv-open': ui.cv = { kind: d.kind, group: d.st ? cvGroupOf(d.st) : 'all' }; renderChartView(); break;
+    case 'cv-close': ui.cv = null; renderChartView(); break;
+    case 'cv-filter': if (ui.cv) { ui.cv.group = d.g; renderChartView(); } break;
     case 'tab': ui.tab = d.tab; LS.set('tab', d.tab); render(); break;
     case 'note-to-task': { const n = S.items[d.item]; if (n) openEditor(null, { name: n.text, fromNote: n.id }); break; }
     case 'notes-clear':
@@ -1545,27 +1630,33 @@ document.addEventListener('click', e => {
       ui.calWeek = Rec.addDays(ui.calWeek, a === 'cal-next' ? 7 : -7);
       ui.calDay = weekStart(ui.today) === ui.calWeek ? ui.today : ui.calWeek; render(); break;
     case 'cal-today': ui.calWeek = weekStart(ui.today); ui.calDay = ui.today; render(); break;
-    case 'toggle-checked': ui.showChecked = ui.showChecked || {}; ui.showChecked[d.list] = !ui.showChecked[d.list]; render(); break;
+    case 'toggle-checked': { const m = LS.get('showChecked', {}) || {}; m[d.list] = !m[d.list]; LS.set('showChecked', m); render(); break; }
     case 'list-toggle': {
       const h = LS.get('listsHidden', []);
       LS.set('listsHidden', h.includes(d.list) ? h.filter(x => x !== d.list) : [...h, d.list]); render(); break;
     }
-    case 'list-add': {
-      const name = prompt('New list name'); if (!name || !name.trim()) break;
-      const id = uid();
-      setMeta('lists', [...metaVal('lists', []), { id, name: name.trim() }]); break;
+    case 'list-add': openListSheet(null); break;
+    case 'list-menu': openListSheet(d.list); break;
+    case 'ls-save': {
+      const inp = document.getElementById('ls-name'), name = inp && inp.value.trim(); if (!name) { inp && inp.focus(); break; }
+      const lists = metaVal('lists', []), back = d.back;
+      if (d.list) setMeta('lists', lists.map(l => l.id === d.list ? Object.assign({}, l, { name }) : l));
+      else setMeta('lists', [...lists, { id: uid(), name }]);
+      back ? openListsManager() : closeOverlay(); break;
     }
-    case 'list-menu': {
+    case 'ls-delete': {
       const lists = metaVal('lists', []), cur = lists.find(l => l.id === d.list); if (!cur) break;
-      const name = prompt(`Rename “${cur.name}” (leave empty to delete the list)`, cur.name);
-      if (name === null) break;
-      if (!name.trim()) {
-        if (!confirm(`Delete the list “${cur.name}” and its items?`)) break;
-        Object.values(S.items).filter(i => i.listId === cur.id).forEach(i => patchItem(i.id, { deleted: true }, false));
-        setMeta('lists', lists.filter(l => l.id !== cur.id));
-      } else setMeta('lists', lists.map(l => l.id === cur.id ? { id: l.id, name: name.trim() } : l));
-      break;
+      const n = Object.values(S.items).filter(i => i.listId === cur.id).length;
+      if (!confirm(`Delete the list “${cur.name}”${n ? ` and its ${n} item${n === 1 ? '' : 's'}` : ''}?`)) break;
+      Object.values(S.items).filter(i => i.listId === cur.id).forEach(i => patchItem(i.id, { deleted: true }, false));
+      setMeta('lists', lists.filter(l => l.id !== cur.id));
+      d.back ? openListsManager() : closeOverlay(); break;
     }
+    case 'lists-manage': openListsManager(); break;
+    case 'lm-edit': openListSheet(d.list, true); break;
+    case 'lm-new': openListSheet(null, true); break;
+    case 'lm-toggle': { const h = LS.get('listsHidden', []); LS.set('listsHidden', h.includes(d.list) ? h.filter(x => x !== d.list) : [...h, d.list]); render(); openListsManager(); break; }
+    case 'lm-all': LS.set('listsHidden', d.v === 'hide' ? metaVal('lists', []).map(l => l.id) : []); render(); openListsManager(); break;
     case 'item-toggle': { const i = S.items[d.item]; if (i) patchItem(i.id, { checked: !i.checked }); break; }
     case 'item-del': { const i = S.items[d.item]; if (i) patchItem(i.id, { deleted: true }); break; }
     case 'list-home': {
@@ -1602,7 +1693,8 @@ document.addEventListener('click', e => {
       const m = Object.assign({}, metaVal('customPhotos', {}) || {}); m[d.set] = (m[d.set] || []).filter(x => x.file !== d.file);
       S.meta.customPhotos = { value: m, updatedAt: Date.now() }; save(); render(); openSettings('photos'); break;
     }
-    case 'toggle-done': ui.showDone = ui.showDone || {}; ui.showDone[d.tid] = !ui.showDone[d.tid]; render(); break;
+    case 'toggle-done': { const m = LS.get('showDone', {}) || {}; m[d.tid] = !m[d.tid]; LS.set('showDone', m); render(); break; }
+    case 'fold-early': LS.set('earlyFolded', !LS.get('earlyFolded', false)); render(); break;
     case 'toggle-particles': LS.set('motion', !LS.get('motion', true)); render(); break;
     case 'sync': flush(); break;
     case 'ed-picker': ed._picker = !ed._picker; renderEditor(); if (ed._picker) { loadCatalog(); const q = document.querySelector('[data-field=_q]'); q && q.focus(); } break;
@@ -1612,12 +1704,13 @@ document.addEventListener('click', e => {
       ed._picker = false; renderEditor(); break;
     }
     case 'ed-color': ed.color = d.v; renderEditor(); break;
-    case 'ed-repeat': ed.repeat = d.v; if (d.v !== 'none' && !ed.start) ed.start = ui.today; if (d.v === 'weekly' && !String(ed.weekdays)) ed.weekdays = String(Rec.weekday(ed.start)); renderEditor(); break;
+    case 'ed-repeat': ed.repeat = d.v; if (d.v !== 'none' && !ed.start) ed.start = ui.today;
+      if (d.v === 'weekly' && !(ed._wds && ed._wds.length)) { ed._wds = [Rec.weekday(ed.start)]; ed.weekdays = String(ed._wds[0]); }
+      renderEditor(); break;
     case 'ed-wd': {
-      let w = Rec.weekdaysOf(ed); const v = +d.v;
-      w = w.includes(v) ? w.filter(x => x !== v) : [...w, v];
-      if (!w.length) break;
-      ed.weekdays = w.sort().join(','); renderEditor(); break;
+      const v = +d.v, w = ed._wds || [];
+      ed._wds = (w.includes(v) ? w.filter(x => x !== v) : [...w, v]).sort();
+      ed.weekdays = ed._wds.join(','); renderEditor(); break;
     }
     case 'ed-save': saveEditor(); break;
     case 'ed-dup': if (ed) {
@@ -1707,12 +1800,14 @@ document.addEventListener('focusout', e => {
   if (e.target.id === 'cat-input') setTimeout(() => { const l = document.getElementById('cat-list'); if (l && !l.contains(document.activeElement)) l.hidden = true; }, 180);
 });
 document.addEventListener('keydown', e => {
-  if (e.key === 'Escape' && overlay().innerHTML) closeOverlay();
+  if (e.key === 'Escape' && overlay().innerHTML) tryClose();
+  else if (e.key === 'Escape' && ui.cv) { ui.cv = null; renderChartView(); }
   if (e.key === 'Enter' && e.target.classList.contains('new-item')) {
     e.preventDefault();
     const lid = e.target.dataset.list;
     if (addFromInput(e.target)) { const n = document.querySelector(`.new-item[data-list="${lid}"]`); n && n.focus(); }
   }
+  if (e.key === 'Enter' && e.target.id === 'ls-name') { e.preventDefault(); const b = document.querySelector('[data-act=ls-save]'); b && b.click(); }
   if (e.key === 'Enter' && e.target.id === 'cat-new') { e.preventDefault(); document.querySelector('[data-act=cat-add]').click(); }
   if (e.key === 'Enter' && e.target.id === 'cat-input') { e.preventDefault(); const v = e.target.value.trim(); const hit = allCategories().find(c => c.toLowerCase() === v.toLowerCase());
     const b = document.createElement('button'); b.dataset.act = 'cat-pick'; b.dataset.v = hit || v; document.body.appendChild(b); b.click(); b.remove(); }
@@ -1831,7 +1926,7 @@ window.addEventListener('resize', () => { const w = isWide(), l = isLap(); if (w
 let drag = null;
 document.addEventListener('pointerdown', e => {
   const g = e.target.closest('.grip'); if (!g) return;
-  const row = g.closest('.view-row'), box = document.getElementById('view-rows');
+  const row = g.closest('.view-row'), box = row && row.parentElement; if (!box) return;
   drag = { row, box, y0: e.clientY }; row.classList.add('dragging'); g.setPointerCapture(e.pointerId); e.preventDefault();
 });
 document.addEventListener('pointermove', e => {
@@ -1842,9 +1937,11 @@ document.addEventListener('pointermove', e => {
 });
 const endDrag = () => {
   if (!drag) return;
-  const order = [...drag.box.children].map(r => +r.dataset.i), vs = views();
+  const order = [...drag.box.children].map(r => +r.dataset.i), isLists = drag.box.dataset.reorder === 'lists';
   drag.row.classList.remove('dragging'); drag = null;
-  if (order.some((v, i) => v !== i)) { setMeta('views', order.map(i => vs[i])); openSettings('views'); }
+  if (!order.some((v, i) => v !== i)) return;
+  if (isLists) { const ls = metaVal('lists', []); setMeta('lists', order.map(i => ls[i])); openListsManager(); }
+  else { const vs = views(); setMeta('views', order.map(i => vs[i])); openSettings('views'); }
 };
 document.addEventListener('pointerup', endDrag); document.addEventListener('pointercancel', endDrag);
 

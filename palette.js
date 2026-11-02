@@ -123,14 +123,15 @@ const Palette = (() => {
       let d = best.h - t; if (d > 180) d -= 360; if (d < -180) d += 360;
       return { h: t + d * .75, s: clamp(best.s * .9, .3, .7) };
     };
-    const P = { p25: sample(24, 40), p50: sample(47, 30), p75: sample(76, 34), done: sample(128, 60), nn: sample(212, 70) };
+    const P = { p25: sample(24, 40), p50: sample(47, 30), p75: sample(76, 34), done: sample(128, 60), nn: sample(212, 70), miss: sample(6, 26) };
     // keep the progress steps in order and apart (orange < yellow < yellow-green < green)
     const seq = ['p25', 'p50', 'p75', 'done'], gaps = [0, 14, 14, 26];
     seq.forEach((k, n) => { if (n && P[k].h < P[seq[n - 1]].h + gaps[n]) P[k].h = P[seq[n - 1]].h + gaps[n]; });
     const status = {
       not_started: hex(H, clamp(baseSat * .12, .03, .07), .52),
       p25: hex(P.p25.h, P.p25.s, .58), p50: hex(P.p50.h, P.p50.s, .6), p75: hex(P.p75.h, P.p75.s * .9, .55),
-      done: hex(P.done.h, P.done.s * .85, .5), not_needed: hex(P.nn.h, P.nn.s * .8, .6)
+      done: hex(P.done.h, P.done.s * .85, .5), not_needed: hex(P.nn.h, P.nn.s * .8, .6),
+      missed: hex(Math.min(Math.max(P.miss.h, -4), 10), clamp(P.miss.s, .55, .72), .55) // red: clearly "didn't happen"
     };
     const bgS = clamp(baseSat * .45, .08, .26);
     return {

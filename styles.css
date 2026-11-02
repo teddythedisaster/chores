@@ -659,3 +659,38 @@ body.lap .settings-mode .sheet.settings .sheet-head { min-height: 56px; }
 .pin-home + .iconbtn, .list-head .pin-home ~ .iconbtn { margin-left: 2px; }
 .lap-any .row { grid-template-columns: 104px 1fr; }
 .lap-any .row .due { display: none; }
+
+/* Settings → Look & theme → Section descriptions (off) */
+.no-hints .page .hint { display: none; }
+
+.rem-err { display: flex; gap: 8px; align-items: flex-start; font-size: 13px; color: #f0a093; }
+.rem-err .ic { flex: none; width: 15px; height: 15px; margin-top: 2px; }
+.wd-warn { display: flex; align-items: center; gap: 6px; color: #f0a093; font-size: 13px; margin-top: 6px; }
+.wd-warn .ic { width: 14px; height: 14px; }
+
+button.early-div { width: 100%; text-align: left; }
+.early-div .ed-n { font-weight: 600; color: var(--text); background: var(--surface2); border-radius: 999px; padding: 0 7px; margin-left: 2px; }
+.early-div .ic:last-child { margin-left: auto; width: 15px; height: 15px; color: var(--muted); }
+
+/* list manager */
+.lm-row .lm-name { display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0; text-align: left; padding: 6px 4px; }
+.lm-row .lm-name span:first-of-type { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lm-row.off .lm-name { color: var(--muted); }
+.lm-btn { padding: 5px 9px; }
+.small-sheet .sheet-body { gap: 10px; }
+
+/* chart detail view */
+.clickable { cursor: pointer; }
+.card.chart.clickable:hover, .lc-ring.clickable:hover, .lc-bar.clickable:hover { filter: brightness(1.06); }
+#cv { position: fixed; inset: 0; z-index: 35; background: var(--bg); overflow-y: auto; padding-bottom: 40px; }
+body.cv-open { overflow: hidden; }
+.cv-head { position: sticky; top: 0; z-index: 2; display: flex; align-items: center; gap: 10px; padding: calc(8px + env(safe-area-inset-top)) 12px 8px 6px;
+  background: color-mix(in srgb, var(--bg) 92%, transparent); backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px); border-bottom: 1px solid var(--border); }
+.cv-head b { font: 700 19px var(--serif); }
+.cv-head .muted { margin-left: auto; font-size: 13px; }
+.cv-head .iconbtn .ic { width: 22px; height: 22px; }
+.cv-body { max-width: 760px; margin: 0 auto; padding: 14px 16px; display: grid; gap: 18px; }
+.cv-body .filters { flex-wrap: wrap; margin: 0; }
+.cv-body .chip b { margin-left: 4px; }
+.cv-body .block { margin: 0; }
+.view-row.lm-row { grid-template-columns: auto minmax(0, 1fr) auto; display: grid; align-items: center; gap: 8px; }

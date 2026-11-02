@@ -22,25 +22,25 @@ const THEMES = {
     label: 'Fall', icon: 'fa:leaf', cats: ['#e8892f', '#d9b23a', '#c95a3c', '#8fae4a', '#b8783a', '#d97a9a', '#6f9fc0', '#a98bd0'],
     vars: { bg: '#191715', surface: '#211e1b', surface2: '#2a2622', border: '#37322c', text: '#ede6dc', muted: '#a0968a',
             accent: '#d97b2f', h1: '#5b3a24', h2: '#5a4a20', h3: '#3f4a2b', h4: '#4d2c2a' },
-    status: { not_started: '#837a71', p25: '#d9772b', p50: '#d9b23a', p75: '#a6b83f', done: '#5f9e4f', not_needed: '#5b8fb8', missed: '#8a5f5a' }
+    status: { not_started: '#837a71', p25: '#d9772b', p50: '#d9b23a', p75: '#a6b83f', done: '#5f9e4f', not_needed: '#5b8fb8', missed: '#d2554a' }
   },
   winter: {
     label: 'Winter', icon: 'fa:snowflake', cats: ['#8cc0e8', '#a79be0', '#6fc6b8', '#e8a0b8', '#e6c75a', '#e0904a', '#9ccf7a', '#c7d3e0'],
     vars: { bg: '#12161b', surface: '#1a2028', surface2: '#212934', border: '#2c3642', text: '#e6edf3', muted: '#8b98a8',
             accent: '#8cc0e8', h1: '#24405a', h2: '#3b3355', h3: '#23474a', h4: '#2e3f55' },
-    status: { not_started: '#7b8592', p25: '#e0904a', p50: '#e6c75a', p75: '#b3c95d', done: '#6fb38a', not_needed: '#6f9fd8', missed: '#8a5f5a' }
+    status: { not_started: '#7b8592', p25: '#e0904a', p50: '#e6c75a', p75: '#b3c95d', done: '#6fb38a', not_needed: '#6f9fd8', missed: '#d2554a' }
   },
   spring: {
     label: 'Spring', icon: 'fa:seedling', cats: ['#e88fb0', '#8fca72', '#e8c45a', '#9ab0f0', '#c49be6', '#f0a070', '#6fc4c0', '#d8e07a'],
     vars: { bg: '#171916', surface: '#1f221e', surface2: '#272b26', border: '#343a32', text: '#eef1ea', muted: '#9ba395',
             accent: '#e88fb0', h1: '#5a3346', h2: '#3d5232', h3: '#574a2c', h4: '#36405a' },
-    status: { not_started: '#858a80', p25: '#ec9a5c', p50: '#ebcf68', p75: '#b5d36a', done: '#6dbb6a', not_needed: '#79a7e0', missed: '#8a5f5a' }
+    status: { not_started: '#858a80', p25: '#ec9a5c', p50: '#ebcf68', p75: '#b5d36a', done: '#6dbb6a', not_needed: '#79a7e0', missed: '#d2554a' }
   },
   summer: {
     label: 'Summer', icon: 'fa:sun', cats: ['#f2b94b', '#4fc1b8', '#f0805a', '#7fc45a', '#5aa0e8', '#e87aa0', '#c89be0', '#e8d85a'],
     vars: { bg: '#121817', surface: '#19211f', surface2: '#202a28', border: '#2b3735', text: '#e9f2ef', muted: '#8fa39e',
             accent: '#f2b94b', h1: '#1f4a48', h2: '#5a4a1c', h3: '#22475a', h4: '#5a3324' },
-    status: { not_started: '#7f8c89', p25: '#f08c3c', p50: '#f2c94c', p75: '#b8d04f', done: '#4fb37e', not_needed: '#4f9ad8', missed: '#8a5f5a' }
+    status: { not_started: '#7f8c89', p25: '#f08c3c', p50: '#f2c94c', p75: '#b8d04f', done: '#4fb37e', not_needed: '#4f9ad8', missed: '#d2554a' }
   }
 };
 

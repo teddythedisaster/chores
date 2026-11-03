@@ -135,7 +135,7 @@ const setMeta = (key, value) => commit({ t: 'meta', key, value, updatedAt: Date.
 
 /* ================= sync with Apps Script ================= */
 let flushTimer = null, inflight = false, retryMs = 4000;
-const BACKEND_VERSION = 9; // matches VERSION in Code.gs
+const BACKEND_VERSION = 10; // matches VERSION in Code.gs
 function scheduleFlush(ms = 350) { clearTimeout(flushTimer); flushTimer = setTimeout(flush, ms); }
 function setSync(s, msg = '') { ui.sync = s; ui.syncMsg = msg; const el = document.getElementById('sync'); if (el) el.outerHTML = syncBadge(); }
 
@@ -150,7 +150,7 @@ async function flush() {
     const data = await res.json();
     if (!data.ok) throw new Error(data.error || 'server error');
     outbox.splice(0, batch.length);
-    (data.notes || []).forEach(n => { if (/^ntfy/.test(n)) toast(`${icon('bell-ring')}${/200/.test(n) ? 'Test sent to ntfy' : 'Test failed: ' + esc(n.replace(/^ntfy error: /, ''))}`); });
+    (data.notes || []).forEach(n => { if (/^ntfy/.test(n)) toast(`${icon('bell-ring')}${/queued/.test(n) ? 'Test queued – your relay sends it within a minute' : /200/.test(n) ? 'Test sent to ntfy' : 'Test failed: ' + esc(n.replace(/^ntfy error: /, ''))}`); });
     loadServerState(data.state);
     retryMs = 4000; setSync('ok');
   } catch (e) {
@@ -1322,8 +1322,11 @@ function renameCategory(from, to) {
 // Settings → Reminders: is the 5-minute check running, and what's set to remind today?
 function reminderStatusHTML() {
   const r = ui.reminders, ago = r && r.lastRun ? Math.round((Date.now() - r.lastRun) / 60000) : null;
+  const relayAgo = r && r.relay ? Math.round((Date.now() - r.relay) / 60000) : null, relayOn = relayAgo !== null && relayAgo < 10;
   let state;
   if (!r) state = `${icon('cloud-off')}Can’t check yet. Update the Google script (see the red bar), then reopen Settings.`;
+  else if (relayOn) state = `${icon('check')}Reminder relay is running (last checked ${relayAgo <= 1 ? 'just now' : relayAgo + ' min ago'}). Reminders go out on the minute.`;
+  else if (relayAgo !== null) state = `${icon('x')}<b>The reminder relay last checked ${relayAgo < 120 ? relayAgo + ' minutes' : Math.round(relayAgo / 60) + ' hours'} ago.</b> Check its cron trigger in Cloudflare (see “Reminders” in the setup guide).`;
   else if (r.triggers === 0) state = `${icon('x')}<b>Reminders aren’t running</b>: the 5-minute check is missing. <button class="linkbtn" data-act="st-fix-reminders">Turn it back on</button>`;
   else if (ago === null) state = `${icon('clock')}The reminder check is set up but hasn’t run yet. Give it 5 minutes.`;
   else if (ago > 20) state = `${icon('x')}<b>The reminder check last ran ${ago < 120 ? ago + ' minutes' : Math.round(ago / 60) + ' hours'} ago</b> (it should run every 5). <button class="linkbtn" data-act="st-fix-reminders">Restart it</button>`;
@@ -1335,8 +1338,7 @@ function reminderStatusHTML() {
     <div class="rem-state">${state}</div>
     ${r && r.lastError ? `<div class="rem-err">${icon('x')}<span><b>Last problem:</b> ${esc(r.lastError)}. It tries again on the next check.</span></div>` : ''}
     ${r && r.lastSent ? `<div class="muted small">Last reminder sent: ${esc(r.lastSent)}</div>` : ''}
-    ${r && 'token' in r ? `<div class="muted small">${r.token ? icon('check', 'inline') + ' Sending with your ntfy account' : '<b>No ntfy access token yet.</b> Without one, ntfy.sh often rejects reminders sent from Google. See “Reminders” in the setup guide.'}</div>` : ''}
-    <div class="muted small">Reminders are handed to ntfy up to 20 minutes early with their exact time, so they arrive on time even when Google’s check runs late.</div>
+    ${r && !relayOn && relayAgo === null ? `<div class="muted small"><b>Set up the reminder relay.</b> ntfy.sh blocks messages sent straight from Google, so reminders need the free Cloudflare relay. See “Reminders” in the setup guide.</div>` : ''}
     <div class="muted small">Today${items.length ? ':' : ': nothing set to remind.'}</div>${rows ? `<ul class="rem-list">${rows}</ul>` : ''}
     <div class="muted small">If the test notification below doesn’t arrive, check the ntfy app is subscribed to your topic and is allowed to send notifications (on Android also set its battery use to Unrestricted).</div></div>`;
 }
